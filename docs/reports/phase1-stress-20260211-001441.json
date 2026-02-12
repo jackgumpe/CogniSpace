@@ -1,0 +1,56 @@
+{
+  "report_id": "phase1-stress-20260211-001441",
+  "generated_at": "2026-02-11T00:15:30.598846+00:00",
+  "inputs": {
+    "autoprompt_runs": 500,
+    "replay_events": 10000,
+    "dataset_sessions": 180
+  },
+  "autoprompt": {
+    "runs_total": 500,
+    "runs_created": 500,
+    "run_failures": 0,
+    "termination_reasons": {
+      "iteration_cap": 498,
+      "plateau": 2
+    },
+    "create_latency_ms": {
+      "p50": 27.512699947692454,
+      "p95": 36.02444007992738,
+      "max": 93.34680018946528,
+      "mean": 29.116363198962063
+    },
+    "get_latency_ms": {
+      "p50": 1.5688500134274364,
+      "p95": 2.0079049281775947,
+      "max": 3.1614000909030437,
+      "mean": 1.619827399495989
+    },
+    "failure_samples": []
+  },
+  "replay": {
+    "pages": 40,
+    "events_seen": 10000,
+    "failure": null
+  },
+  "dataset_build": {
+    "status_code": 201,
+    "latency_ms": 2493.3342998847365,
+    "dataset_id": "jsonic_3fbf1eb79215",
+    "event_count": 1440,
+    "conversation_count": 180
+  },
+  "edge_cases": {
+    "since_event_not_found_returns_404": true,
+    "budget_iterations_cap_enforced": true
+  },
+  "quality_gates": {
+    "silent_failures_detected": false,
+    "all_primary_checks_passed": true
+  },
+  "paths": {
+    "log_dir": "C:\\Dev\\llm-workspace\\backend\\logs_stress\\20260211-001441",
+    "dataset_dir": "C:\\Dev\\llm-workspace\\backend\\datasets_stress\\20260211-001441",
+    "report_file": "C:\\Dev\\llm-workspace\\docs\\reports\\phase1-stress-20260211-001441.json"
+  }
+}

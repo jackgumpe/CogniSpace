@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<global_tag_protocol id="GLOBAL_CONTROL_TAGS_V1" version="1.0.0">
+  <intent>
+    Define reusable XML control tags that can be embedded in prompts/tasks to enforce
+    predictable runtime behavior across planning, debate, execution, and quality gates.
+  </intent>
+
+  <parsing_rules>
+    <rule>Tags are case-insensitive and must be closed: &lt;tag&gt;value&lt;/tag&gt;.</rule>
+    <rule>If a tag is repeated, later occurrence wins unless explicitly list-typed.</rule>
+    <rule>Unknown tags are preserved in raw_tags but do not change behavior.</rule>
+    <rule>Malformed values produce parse_warnings and safe defaults.</rule>
+  </parsing_rules>
+
+  <tags>
+    <tag name="critical" type="boolean">
+      <description>Escalates work to high-risk handling and strict decision authority.</description>
+      <actions>
+        <action>severity=CRITICAL</action>
+        <action>debate_mode_override=SYNC</action>
+        <action>min_debate_cycles=3</action>
+        <action>requires_supervisor_approval=true</action>
+        <action>required_utilities += RISK_REVIEW, FAILSAFE_CHECKLIST, ROLLBACK_PLAN, ESCALATION_AUDIT_LOG</action>
+      </actions>
+      <example>&lt;critical&gt;true&lt;/critical&gt;</example>
+    </tag>
+
+    <tag name="cautious" type="boolean">
+      <description>Forces conservative execution with extra risk checks.</description>
+      <actions>
+        <action>severity=CAUTIOUS unless already CRITICAL</action>
+        <action>min_debate_cycles &gt;= 2</action>
+        <action>required_utilities += RISK_REVIEW, ASSUMPTION_TRACKER</action>
+      </actions>
+      <example>&lt;cautious&gt;yes&lt;/cautious&gt;</example>
+    </tag>
+
+    <tag name="agents_required" type="integer">
+      <description>Requests total team size. Minimum 7, maximum 20.</description>
+      <actions>
+        <action>agents_required=clamp(value, 7, 20)</action>
+        <action>Team layout remains hierarchical: 1 supervisor, 2 leads, remaining developers.</action>
+      </actions>
+      <example>&lt;agents_required&gt;9&lt;/agents_required&gt;</example>
+    </tag>
+
+    <tag name="debate_mode" type="enum(SYNC|ASYNC|MIXED)">
+      <description>Overrides default debate strategy for planning/benchmark rounds.</description>
+      <actions>
+        <action>debate_mode_override=value</action>
+      </actions>
+      <example>&lt;debate_mode&gt;MIXED&lt;/debate_mode&gt;</example>
+    </tag>
+
+    <tag name="min_debate_cycles" type="integer">
+      <description>Sets lower bound for debate cycles per round.</description>
+      <actions>
+        <action>min_debate_cycles=clamp(value, 1, 8)</action>
+      </actions>
+      <example>&lt;min_debate_cycles&gt;2&lt;/min_debate_cycles&gt;</example>
+    </tag>
+
+    <tag name="context_handoff" type="boolean">
+      <description>Requires context-window handoff artifacts before completion.</description>
+      <actions>
+        <action>context_handoff_required=true</action>
+        <action>Add mandatory Kanban card for handoff packet build/validation.</action>
+      </actions>
+      <example>&lt;context_handoff&gt;required&lt;/context_handoff&gt;</example>
+    </tag>
+
+    <tag name="supervisor_approval" type="boolean">
+      <description>Enforces supervisor sign-off before release gate closure.</description>
+      <actions>
+        <action>requires_supervisor_approval=value</action>
+      </actions>
+      <example>&lt;supervisor_approval&gt;true&lt;/supervisor_approval&gt;</example>
+    </tag>
+
+    <tag name="utility" type="list(string)">
+      <description>Registers additional utility functions required in workflow.</description>
+      <actions>
+        <action>required_utilities += UPPERCASE(tokens from comma/newline separated list)</action>
+      </actions>
+      <example>&lt;utility&gt;schema_linter, security_scan&lt;/utility&gt;</example>
+    </tag>
+  </tags>
+
+  <quality_requirements>
+    <requirement>All resolved directives must be exposed in API responses and logged events.</requirement>
+    <requirement>Directive parsing must be deterministic and unit-tested.</requirement>
+    <requirement>Critical/Cautious directives must alter runtime behavior, not only metadata.</requirement>
+  </quality_requirements>
+</global_tag_protocol>

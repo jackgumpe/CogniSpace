@@ -1,0 +1,2 @@
+[console_scripts]
+cogni-backend = app.cli:run

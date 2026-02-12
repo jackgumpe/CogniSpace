@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-workspace/contracts/autoprompt_run.schema.json",
+  "title": "AutopromptRun",
+  "type": "object",
+  "required": [
+    "run_id",
+    "task_key",
+    "status",
+    "created_at",
+    "budget",
+    "baseline_prompt_version"
+  ],
+  "properties": {
+    "run_id": { "type": "string" },
+    "task_key": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED"]
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": ["string", "null"], "format": "date-time" },
+    "baseline_prompt_version": { "type": "string" },
+    "best_prompt_version": { "type": ["string", "null"] },
+    "budget": {
+      "type": "object",
+      "required": ["max_iterations", "max_tokens", "max_cost_usd", "timeout_seconds"],
+      "properties": {
+        "max_iterations": { "type": "integer", "minimum": 1 },
+        "max_tokens": { "type": "integer", "minimum": 1 },
+        "max_cost_usd": { "type": "number", "minimum": 0 },
+        "timeout_seconds": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

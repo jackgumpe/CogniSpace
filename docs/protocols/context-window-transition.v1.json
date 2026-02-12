@@ -1,0 +1,143 @@
+{
+  "protocol_id": "CONTEXT_WINDOW_TRANSITION_V1",
+  "version": "1.0.0",
+  "intent": "Safely transition an agent from one context window to the next with minimal drift, bounded cost, and explicit failure handling.",
+  "research_basis": {
+    "sources": [
+      "research/HCM/HCM-Integration-Feasibility.docx",
+      "research/HCM/context-aware-hierarchical.pdf",
+      "research/HCM/context-merging.pdf",
+      "research/HCM/Hierarchical_context_pruning.pdf",
+      "research/Long-context/Helmet-evaluate-long-context.pdf",
+      "research/Long-context/Recursive-large-models.pdf"
+    ],
+    "source_derived_findings": [
+      "Long-context performance degrades with naive linear context growth (context rot / lost-in-the-middle effects).",
+      "Recursive context processing and externalized memory can scale beyond base context window limits.",
+      "For code tasks, topology-preserving pruning outperforms naive concatenation and flat retrieval.",
+      "Hierarchical merging is stronger when summaries are grounded by source evidence (support/refine), not pure recursive abstraction.",
+      "Evaluation must include diverse categories; synthetic-only tests are insufficient."
+    ]
+  },
+  "handoff_trigger_policy": {
+    "trigger_if_any": [
+      "window_utilization_ratio >= 0.75",
+      "estimated_next_turn_tokens > available_tokens * 0.6",
+      "drift_risk_score >= 0.5",
+      "unresolved_threads_count >= 5",
+      "latency_budget_risk == true"
+    ],
+    "forced_trigger_if": [
+      "window_utilization_ratio >= 0.90",
+      "critical_invariant_missing == true"
+    ]
+  },
+  "handoff_packet_schema": {
+    "required": [
+      "schema_version",
+      "session_id",
+      "trace_id",
+      "handoff_id",
+      "created_at",
+      "mission",
+      "hard_constraints",
+      "active_threads",
+      "decisions",
+      "artifacts",
+      "open_questions",
+      "risk_register",
+      "next_actions",
+      "evidence_refs",
+      "validation"
+    ],
+    "fields": {
+      "schema_version": "string",
+      "session_id": "string",
+      "trace_id": "string",
+      "handoff_id": "string",
+      "created_at": "ISO-8601 datetime",
+      "mission": {
+        "goal": "string",
+        "definition_of_done": "array[string]"
+      },
+      "hard_constraints": "array[string]",
+      "active_threads": "array[{thread_id,status,summary,last_event_id}]",
+      "decisions": "array[{decision_id,decision,rationale,evidence_ref_ids}]",
+      "artifacts": "array[{artifact_id,path_or_uri,checksum,summary}]",
+      "open_questions": "array[{question_id,question,owner,blocking}]",
+      "risk_register": "array[{risk_id,risk,severity,mitigation,status}]",
+      "next_actions": "array[{action_id,action,owner,priority}]",
+      "evidence_refs": "array[{ref_id,source_type,source_pointer,start_event_id,end_event_id}]",
+      "validation": {
+        "invariants_passed": "boolean",
+        "coverage_score": "number[0..1]",
+        "confidence_score": "number[0..1]",
+        "checksum": "sha256"
+      }
+    }
+  },
+  "transition_algorithm": [
+    "1) Freeze: stop adding non-critical context to current window.",
+    "2) Snapshot: collect active state from logs, decisions, artifacts, unresolved threads.",
+    "3) Compress: build hierarchical summary with evidence-grounded support snippets.",
+    "4) Prune: remove low-signal noise; preserve dependency/topology links for code contexts.",
+    "5) Validate: run invariant checks and compute coverage/confidence scores.",
+    "6) Bootstrap: start next window with handoff packet + selected raw evidence chunks.",
+    "7) Verify continuity: run continuity probes against prior state before full execution resumes."
+  ],
+  "continuity_probes": [
+    "probe_goal: model must restate mission and non-negotiable constraints verbatim/semantically equivalent.",
+    "probe_threads: model must enumerate active thread IDs and statuses.",
+    "probe_decisions: model must name recent critical decisions and rationale.",
+    "probe_artifacts: model must identify latest artifacts and expected next edits.",
+    "probe_risks: model must report top risks and mitigations."
+  ],
+  "failure_handling": {
+    "hard_fail_if": [
+      "validation.invariants_passed == false",
+      "validation.coverage_score < 0.8",
+      "continuity_probe_failures >= 1"
+    ],
+    "fallback_actions": [
+      "retry with larger evidence budget",
+      "switch to support/refine merge strategy",
+      "invoke context manager agent for manual reconciliation",
+      "block execution and emit SYSTEM_ALERT"
+    ]
+  },
+  "observability": {
+    "required_events": [
+      "CONTEXT_HANDOFF_STARTED",
+      "CONTEXT_HANDOFF_PACKET_BUILT",
+      "CONTEXT_HANDOFF_VALIDATED",
+      "CONTEXT_HANDOFF_BOOTSTRAPPED",
+      "CONTEXT_HANDOFF_FAILED",
+      "CONTEXT_HANDOFF_COMPLETED"
+    ],
+    "required_metrics": [
+      "window_utilization_ratio",
+      "handoff_latency_ms",
+      "coverage_score",
+      "confidence_score",
+      "continuity_probe_pass_rate",
+      "post_handoff_regression_rate"
+    ]
+  },
+  "evaluation_gates": {
+    "offline": [
+      "pass@k on long-context tasks before/after handoff",
+      "decision-consistency score across handoff boundary",
+      "artifact-correctness delta after handoff"
+    ],
+    "online": [
+      "no increase in silent-failure incidence",
+      "no significant regression in completion quality at same cost budget",
+      "bounded latency overhead per handoff"
+    ]
+  },
+  "implementation_notes": [
+    "Use sanitized logs for normal operations, raw logs only for controlled dataset builds.",
+    "Store handoff packet as first event in new window for deterministic replay.",
+    "Treat handoff packet as contract: schema validation required before execution."
+  ]
+}

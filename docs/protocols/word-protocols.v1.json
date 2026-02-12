@@ -1,0 +1,72 @@
+{
+  "protocol_id": "WORD_PROTOCOLS_V1",
+  "version": "1.0.0",
+  "meta_rules": [
+    "No undefined quality words allowed. If a term is not in this protocol, return BLOCKER_UNDEFINED_TERM.",
+    "Every quality claim must map to at least one measurable gate.",
+    "Implementation is rejected if any required gate is untested or unreported."
+  ],
+  "term_protocols": {
+    "production_grade": {
+      "definition": "Code is deployable with measurable correctness, reliability, security, observability, and maintainability for the scoped phase.",
+      "required_gates": [
+        "correctness: all required API/schema tests pass",
+        "reliability: retries/timeouts/budget caps implemented for long-running loops",
+        "security: secret redaction + input validation + no unsafe raw persistence",
+        "observability: structured logs with trace/session correlation and replay support",
+        "maintainability: typed models, modular services, no placeholder TODO stubs in required paths"
+      ],
+      "fail_if": [
+        "missing tests for required endpoints",
+        "non-deterministic replay order",
+        "budget caps absent",
+        "schema drift between declared contract and runtime payload"
+      ]
+    },
+    "robust": {
+      "definition": "System handles expected failures predictably without silent corruption.",
+      "required_gates": [
+        "explicit error codes for API failures",
+        "timeout handling for optimizer runs",
+        "idempotent deploy/activate operations",
+        "recovery path for reconnect/replay"
+      ]
+    },
+    "scalable": {
+      "definition": "Architecture can increase load via horizontal workers and bounded resource controls.",
+      "required_gates": [
+        "background worker boundary exists",
+        "queue/backpressure strategy documented",
+        "token/cost/iteration limits enforced"
+      ]
+    },
+    "complete": {
+      "definition": "All items in scope are implemented and verified; out-of-scope items are explicitly excluded.",
+      "required_gates": [
+        "scope checklist 100% complete",
+        "test report attached",
+        "known risks listed"
+      ]
+    }
+  },
+  "phase1_hard_acceptance": {
+    "scope": [
+      "autoprompt run lifecycle APIs",
+      "global/local replayable logging APIs"
+    ],
+    "must_pass": [
+      "POST /api/v1/autoprompt/runs works with budget validation",
+      "GET /api/v1/autoprompt/runs/{run_id} returns live status/metrics",
+      "POST /api/v1/autoprompt/deploy/{prompt_version} is idempotent",
+      "GET /api/v1/logs/sessions/{session_id}/events?since={event_id} returns ordered, gap-free replay",
+      "secret redaction verified by test",
+      "drift guard rejection verified by test"
+    ],
+    "required_test_files": [
+      "backend/tests/test_autoprompt_api.py",
+      "backend/tests/test_logging_replay.py",
+      "backend/tests/test_budget_caps.py",
+      "backend/tests/test_drift_guard.py"
+    ]
+  }
+}

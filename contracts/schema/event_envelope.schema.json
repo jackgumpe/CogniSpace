@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://llm-workspace/contracts/event_envelope.schema.json",
+  "title": "EventEnvelope",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "event_id",
+    "session_id",
+    "trace_id",
+    "timestamp_utc",
+    "actor_id",
+    "actor_role",
+    "event_type",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "event_id": { "type": "string" },
+    "parent_event_id": { "type": ["string", "null"] },
+    "session_id": { "type": "string" },
+    "trace_id": { "type": "string" },
+    "timestamp_utc": { "type": "string", "format": "date-time" },
+    "actor_id": { "type": "string" },
+    "actor_role": {
+      "type": "string",
+      "enum": ["PM", "LEAD", "DEV", "AUDITOR", "SYSTEM", "USER"]
+    },
+    "channel": {
+      "type": "string",
+      "enum": ["GLOBAL", "LOCAL", "SYSTEM", "AUTOPROMPT"]
+    },
+    "event_type": { "type": "string" },
+    "payload": { "type": "object", "additionalProperties": true },
+    "safety_flags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "token_in": { "type": "integer", "minimum": 0 },
+    "token_out": { "type": "integer", "minimum": 0 },
+    "latency_ms": { "type": "integer", "minimum": 0 },
+    "cost_usd": { "type": "number", "minimum": 0 }
+  },
+  "additionalProperties": false
+}
