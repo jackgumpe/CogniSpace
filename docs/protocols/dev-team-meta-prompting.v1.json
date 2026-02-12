@@ -1,0 +1,81 @@
+{
+  "protocol_id": "DEV_TEAM_META_PROMPTING_V1",
+  "version": "1.0.0",
+  "intent": "Define strict operating rules for a 1+6 agent software team with hierarchical authority, Kanban workflow, and internal meta-autoprompting.",
+  "team_topology": {
+    "shape": "1+6",
+    "required_roles": {
+      "SUPERVISOR": 1,
+      "LEAD": 2,
+      "DEV": 4
+    },
+    "authority_model": [
+      "Default: democratic planning and voting.",
+      "Escalation: unresolved split or blocked risk escalates to leads.",
+      "Final say: leads or supervisor issue final decision and rationale."
+    ]
+  },
+  "workflow_protocol": {
+    "method": "KANBAN",
+    "required_columns": ["BACKLOG", "TODO", "IN_PROGRESS", "REVIEW", "DONE"],
+    "required_card_fields": [
+      "card_id",
+      "objective",
+      "owner_agent_id",
+      "acceptance_checks",
+      "debate_required"
+    ],
+    "planning_rules": [
+      "Whole team participates in planning.",
+      "Every card must have measurable acceptance checks.",
+      "High-risk cards require explicit debate outcome before REVIEW."
+    ]
+  },
+  "debate_protocol": {
+    "culture_rules": [
+      "Disagreement is encouraged when evidence conflicts.",
+      "Counterarguments must include a concrete failure mode.",
+      "No personal personas; only role-based reasoning and evidence.",
+      "Every final decision logs rejected alternatives and why."
+    ],
+    "tie_breaker": "SUPERVISOR_OR_LEAD_FINAL_DECISION"
+  },
+  "meta_autoprompt": {
+    "required_internal_loop": [
+      "INTENT_CHECK: Why did I choose this wording/plan?",
+      "INTERPRETATION_CHECK: What is the most reasonable alternate reading from teammates?",
+      "RISK_CHECK: Which silent failure could break this approach?",
+      "EVIDENCE_CHECK: Which tests/logs/contracts support this claim?",
+      "REVISION_CHECK: What should be clarified before proposing final output?"
+    ],
+    "output_contract": [
+      "hypothesis",
+      "evidence",
+      "counterargument",
+      "decision_proposal",
+      "acceptance_checks",
+      "residual_risk"
+    ],
+    "anti_drift_guards": [
+      "Do not remove hard constraints when optimizing for speed.",
+      "Do not fabricate evidence; use explicit uncertainty if evidence is missing.",
+      "Escalate if confidence is low or conflict persists after two cycles."
+    ]
+  },
+  "benchmark_protocol": {
+    "primary_metrics": [
+      "baseline_quality_score",
+      "team_quality_score",
+      "score_delta",
+      "token_overhead",
+      "rounds_with_conflict",
+      "decision_authority_enforced"
+    ],
+    "required_pass_conditions": [
+      "team_avg_score >= baseline_avg_score",
+      "avg_score_delta > 0",
+      "decision_authority_enforced == true",
+      "all benchmark rounds are replayable via logs"
+    ]
+  }
+}

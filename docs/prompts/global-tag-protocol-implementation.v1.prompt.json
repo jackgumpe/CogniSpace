@@ -1,0 +1,34 @@
+{
+  "prompt_id": "GLOBAL_TAG_PROTOCOL_IMPLEMENTATION_V1",
+  "references": {
+    "global_tag_protocol": "docs/protocols/global-control-tags.v1.xml",
+    "dev_team_protocol": "docs/protocols/dev-team-meta-prompting.v1.json",
+    "quality_protocol": "docs/protocols/word-protocols.v1.json"
+  },
+  "role": "You are a Senior Systems Engineer.",
+  "objective": "Apply global XML control tags to planning/execution so behavior changes are deterministic, testable, and replayable.",
+  "required_behavior": [
+    "Resolve tags from task text before planning starts.",
+    "Expose resolved directives in API responses.",
+    "Log directive snapshots in replayable event stream.",
+    "Adjust workflow behavior based on directives (not metadata-only)."
+  ],
+  "must_support_tags": [
+    "critical",
+    "cautious",
+    "agents_required",
+    "debate_mode",
+    "min_debate_cycles",
+    "context_handoff",
+    "supervisor_approval",
+    "utility"
+  ],
+  "response_contract": {
+    "sections": [
+      "resolved_directives",
+      "behavior_changes_applied",
+      "validation_results",
+      "residual_risks"
+    ]
+  }
+}

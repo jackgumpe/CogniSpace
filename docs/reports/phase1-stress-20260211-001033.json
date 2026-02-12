@@ -1,0 +1,48 @@
+{
+  "report_id": "phase1-stress-20260211-001033",
+  "generated_at": "2026-02-11T00:10:33.956171+00:00",
+  "inputs": {
+    "autoprompt_runs": 300,
+    "replay_events": 4000,
+    "dataset_sessions": 120
+  },
+  "autoprompt": {
+    "runs_total": 300,
+    "run_failures": 0,
+    "termination_reasons": {
+      "token_cap": 50,
+      "plateau": 200,
+      "iteration_cap": 50
+    },
+    "create_latency_ms": {
+      "p50": 31.26380010508001,
+      "p95": 44.494305085390835,
+      "max": 90.52069997414947,
+      "mean": 30.96304332992683
+    },
+    "get_latency_ms": {
+      "p50": 1.6901501221582294,
+      "p95": 2.475370094180107,
+      "max": 6.802799878641963,
+      "mean": 1.8653660050282876
+    },
+    "failure_samples": []
+  },
+  "replay": {
+    "pages": 16,
+    "events_seen": 4000,
+    "failure": null
+  },
+  "dataset_build": {
+    "status_code": 201,
+    "latency_ms": 1801.9870999269187,
+    "dataset_id": "jsonic_10dd578f85b8",
+    "event_count": 938,
+    "conversation_count": 120
+  },
+  "paths": {
+    "log_dir": "C:\\Dev\\llm-workspace\\backend\\logs_stress\\20260211-001033",
+    "dataset_dir": "C:\\Dev\\llm-workspace\\backend\\datasets_stress\\20260211-001033",
+    "report_file": "C:\\Dev\\llm-workspace\\docs\\reports\\phase1-stress-20260211-001033.json"
+  }
+}

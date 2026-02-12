@@ -1,0 +1,75 @@
+{
+  "plan_id": "phase2-plan-20260211-001441",
+  "generated_at": "2026-02-11T00:15:30.599045+00:00",
+  "phase": "PHASE_2_CONTEXT_TRANSITION_AND_ORCHESTRATION",
+  "entry_criteria": [
+    "Phase-1 tests green",
+    "Stress report all_primary_checks_passed true",
+    "Raw log and dataset access controls validated"
+  ],
+  "workstreams": [
+    {
+      "id": "WS1_CONTEXT_TRANSITION",
+      "scope": "Implement deterministic context-window handoff protocol and continuation metadata.",
+      "deliverables": [
+        "Handoff schema v1",
+        "Window transition service",
+        "Resume token + integrity checks",
+        "Cross-window replay tests"
+      ],
+      "exit_tests": [
+        "No missing tool events across window boundary",
+        "Resume reproduces same ordered event stream"
+      ]
+    },
+    {
+      "id": "WS2_AGENT_RUNTIME",
+      "scope": "Introduce team graph, role assignment, and PM arbitration hooks (without UI coupling).",
+      "deliverables": [
+        "Agent/team registry",
+        "Task routing policy",
+        "Deadlock escalation path",
+        "Conflict resolution audit logs"
+      ],
+      "exit_tests": [
+        "2v2 conflict routes to arbiter path",
+        "All decisions append replayable rationale events"
+      ]
+    },
+    {
+      "id": "WS3_OBSERVABILITY_AND_GUARDS",
+      "scope": "Add metrics/traces and failure budgets for orchestration loops.",
+      "deliverables": [
+        "Run-level metrics",
+        "Alert thresholds",
+        "Backpressure/circuit-breaker rules"
+      ],
+      "exit_tests": [
+        "Synthetic overload degrades gracefully",
+        "No silent exception paths"
+      ]
+    }
+  ],
+  "milestones": [
+    {
+      "id": "M1",
+      "target": "Context handoff MVP + tests",
+      "eta_days": 5
+    },
+    {
+      "id": "M2",
+      "target": "Agent runtime + arbitration",
+      "eta_days": 7
+    },
+    {
+      "id": "M3",
+      "target": "Observability + soak test",
+      "eta_days": 4
+    }
+  ],
+  "phase3_ready_gate": [
+    "72h soak run with zero silent failures",
+    "Replay determinism preserved under pagination and since anchors",
+    "Handoff integrity checks >= 99.9% pass rate"
+  ]
+}

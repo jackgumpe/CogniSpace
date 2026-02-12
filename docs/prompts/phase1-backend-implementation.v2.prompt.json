@@ -1,0 +1,109 @@
+{
+  "prompt_id": "PHASE1_BACKEND_IMPLEMENTATION_V2",
+  "references": {
+    "quality_protocol": "docs/protocols/word-protocols.v1.json",
+    "contracts": [
+      "contracts/schema/event_envelope.schema.json",
+      "contracts/schema/autoprompt_run.schema.json"
+    ]
+  },
+  "role": "You are a Senior Backend Engineer.",
+  "objective": "Implement Phase-1 backend for autoprompting and replayable global/local logging.",
+  "hard_scope": [
+    "Global/local replayable logging APIs",
+    "Autoprompt run lifecycle APIs with budget controls",
+    "Minimal ProTeGi-style loop: critic -> candidate -> evaluate -> select",
+    "Strict schema validation against contracts"
+  ],
+  "out_of_scope": [
+    "Multi-LLM arbitration",
+    "UI features",
+    "Debate engine"
+  ],
+  "required_files": [
+    "backend/app/api/autoprompt.py",
+    "backend/app/api/logs.py",
+    "backend/app/models/autoprompt.py",
+    "backend/app/services/autoprompt/engine.py",
+    "backend/app/services/autoprompt/registry.py",
+    "backend/app/services/autoprompt/drift_guard.py",
+    "backend/app/services/logging/event_store.py",
+    "backend/app/main.py",
+    "backend/tests/test_autoprompt_api.py",
+    "backend/tests/test_logging_replay.py",
+    "backend/tests/test_budget_caps.py",
+    "backend/tests/test_drift_guard.py"
+  ],
+  "api_requirements": [
+    {
+      "method": "POST",
+      "path": "/api/v1/autoprompt/runs",
+      "must_validate": [
+        "task_key",
+        "baseline_prompt",
+        "budget.max_iterations",
+        "budget.max_tokens",
+        "budget.max_cost_usd",
+        "budget.timeout_seconds"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/autoprompt/runs/{run_id}",
+      "must_return": [
+        "status",
+        "best_candidate",
+        "metrics",
+        "budget_usage"
+      ]
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/autoprompt/deploy/{prompt_version}",
+      "must_be": [
+        "idempotent"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/logs/sessions/{session_id}"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/logs/sessions/{session_id}/events?since={event_id}",
+      "must_be": [
+        "ordered",
+        "gap_free",
+        "deterministic"
+      ]
+    }
+  ],
+  "socket_events": [
+    "AUTOPROMPT_RUN_STATUS",
+    "AUTOPROMPT_CANDIDATE",
+    "AUTOPROMPT_DEPLOYED",
+    "LOG_EVENT"
+  ],
+  "quality_protocol_enforcement": [
+    "Apply WORD_PROTOCOLS_V1 strictly.",
+    "Treat any undefined quality term as BLOCKER_UNDEFINED_TERM.",
+    "Do not claim production_grade unless all mapped gates are implemented and passing.",
+    "Return a gate checklist with pass/fail evidence."
+  ],
+  "tests_required": [
+    "Replay ordering and since-event correctness",
+    "Budget cap enforcement: iterations/tokens/cost/timeout",
+    "Drift guard rejection",
+    "API happy-path coverage for required endpoints"
+  ],
+  "response_contract": {
+    "sections": [
+      "changed_files",
+      "implemented_behavior",
+      "gate_checklist",
+      "test_results",
+      "residual_risks"
+    ]
+  }
+
+}
