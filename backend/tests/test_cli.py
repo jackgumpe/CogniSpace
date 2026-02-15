@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.cli import main
 
@@ -185,6 +186,7 @@ def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # n
     assert "GITOPS ADVISE" in out
     assert "GITOPS META-PLAN" in out
     assert "GITOPS PR-OPEN" in out
+    assert "GITOPS SHIP" in out
 
 
 def test_cli_team_live_outputs_public_reasoning_transcript(tmp_path: Path, capsys) -> None:  # noqa: ANN001
@@ -460,3 +462,106 @@ def test_cli_gitops_pr_open_auth_required_is_actionable(tmp_path: Path, capsys, 
     payload = _read_json_output(capsys)
     assert payload["error_code"] == "GH_AUTH_REQUIRED"
     assert any("auth login" in row for row in payload["fix"])
+
+
+def test_cli_gitops_ship_success(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    class _FakeHandoffResult:
+        status = "SUCCEEDED"
+        branch_name = "feature/ship-auto"
+
+        def model_dump(self, mode="json"):  # noqa: ANN001
+            return {
+                "status": "SUCCEEDED",
+                "branch_name": self.branch_name,
+                "summary": {"steps_failed": 0},
+            }
+
+    class _FakeAdvisor:
+        def handoff(self, request):  # noqa: ANN001
+            assert request.pathspec == ["backend/app/cli.py"]
+            assert request.dry_run is False
+            return _FakeHandoffResult()
+
+    monkeypatch.setattr(
+        cli_module,
+        "_create_runtime",
+        lambda _args: SimpleNamespace(gitops_advisor=_FakeAdvisor()),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_gitops_pr_open_result",
+        lambda **kwargs: (0, {"status": "created", "url": "https://github.com/jackgumpe/CogniSpace/pull/999"}),
+    )
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "ship",
+            "--objective",
+            "ship command smoke",
+            "--pathspec",
+            "backend/app/cli.py",
+            "--no-run-tests",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["status"] == "succeeded"
+    assert payload["handoff"]["status"] == "SUCCEEDED"
+    assert payload["pr"]["status"] == "created"
+
+
+def test_cli_gitops_ship_stops_when_handoff_fails(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    class _FakeHandoffResult:
+        status = "FAILED"
+        branch_name = "feature/ship-auto"
+
+        def model_dump(self, mode="json"):  # noqa: ANN001
+            return {
+                "status": "FAILED",
+                "branch_name": self.branch_name,
+                "summary": {"steps_failed": 1},
+            }
+
+    class _FakeAdvisor:
+        def handoff(self, request):  # noqa: ANN001, ARG002
+            return _FakeHandoffResult()
+
+    monkeypatch.setattr(
+        cli_module,
+        "_create_runtime",
+        lambda _args: SimpleNamespace(gitops_advisor=_FakeAdvisor()),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_gitops_pr_open_result",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("pr-open should not run when handoff fails")),
+    )
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "ship",
+            "--objective",
+            "ship command failing handoff",
+            "--pathspec",
+            "backend/app/cli.py",
+            "--no-run-tests",
+            "--output-json",
+        ]
+    )
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "SHIP_HANDOFF_FAILED"
+    assert payload["handoff"]["status"] == "FAILED"
