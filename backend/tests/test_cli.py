@@ -162,6 +162,16 @@ def test_cli_autoprompt_run_and_logs_debug_access(tmp_path: Path, capsys) -> Non
     assert len(preplan_payload["horizon_cards"]) == 6
     assert "replay_anchor_event_id" in preplan_payload["context_handoff_packet"]["required_fields"]
 
+    code = main(args + ["team", "gather-gitops", "--output-json"])
+    assert code == 0
+    gitops_team_payload = _read_json_output(capsys)
+    assert gitops_team_payload["default_process_active"] is True
+    assert gitops_team_payload["task_key"] == "git_automation_process"
+    assert any(
+        row["check"] == "gitops_focus_present" and row["passed"]
+        for row in gitops_team_payload["validation"]
+    )
+
 
 def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # noqa: ANN001
     args = _base_args(tmp_path)
@@ -171,7 +181,43 @@ def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # n
     assert "COGNISPACE BACKEND CLI - DOS HELP" in out
     assert "AUTOPROMPT METRICS SHOW" in out
     assert "TEAM PREPLAN" in out
+    assert "TEAM GATHER-GITOPS" in out
     assert "GITOPS ADVISE" in out
+    assert "GITOPS META-PLAN" in out
+
+
+def test_cli_team_live_outputs_public_reasoning_transcript(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    args = _base_args(tmp_path)
+
+    code = main(
+        args
+        + [
+            "team",
+            "live",
+            "--task-key",
+            "phase_exec_demo",
+            "--task-description",
+            "Stream real-time public reasoning between supervisor leads and devs.",
+            "--turns",
+            "6",
+            "--debate-mode",
+            "MIXED",
+            "--stream-delay-ms",
+            "0",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["task_key"] == "phase_exec_demo"
+    assert payload["total_messages"] == 6
+    assert len(payload["attendance"]) >= 7
+    assert len(payload["messages"]) == 6
+    assert payload["messages"][-1]["message_type"] == "DECISION"
+    assert payload["messages"][0]["outward_prose"]
+    assert "public_reasoning" in payload["messages"][0]
+    assert payload["private_chain_of_thought_exposed"] is False
+    assert all(not row["private_chain_of_thought_exposed"] for row in payload["messages"])
 
 
 def test_cli_menu_help_then_exit(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
@@ -217,6 +263,7 @@ def test_cli_gitops_snapshot_and_advise(tmp_path: Path, capsys) -> None:  # noqa
     snapshot_payload = _read_json_output(capsys)
     assert "status" in snapshot_payload
     assert "repo_root" in snapshot_payload
+    assert "changed_paths" in snapshot_payload
 
     code = main(
         args
@@ -240,6 +287,77 @@ def test_cli_gitops_snapshot_and_advise(tmp_path: Path, capsys) -> None:  # noqa
     assert "agent_recommendations" in advise_payload
     assert len(advise_payload["agent_recommendations"]) == 3
     assert "suggested_commit_message" in advise_payload
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-plan",
+            "--objective",
+            "build perpetual git meta planning system for automation",
+            "--repo-name",
+            "CogniSpace",
+            "--risk-level",
+            "HIGH",
+            "--meta-squared",
+            "PATCH",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    meta_payload = _read_json_output(capsys)
+    assert meta_payload["objective"] == "build perpetual git meta planning system for automation"
+    assert len(meta_payload["specialist_team"]) >= 4
+    assert len(meta_payload["meta_metrics"]) >= 5
+    assert meta_payload["meta_squared"]["enabled"] is True
+    assert meta_payload["meta_squared"]["mode"] == "PATCH"
+    assert meta_payload["meta_squared"]["triggered"] is True
+    assert "risk_level_high" in meta_payload["meta_squared"]["trigger_reasons"]
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-plan",
+            "--objective",
+            "build git planning with meta squared off",
+            "--meta-squared",
+            "OFF",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    meta_off_payload = _read_json_output(capsys)
+    assert meta_off_payload["meta_squared"]["enabled"] is False
+    assert meta_off_payload["meta_squared"]["mode"] == "OFF"
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "handoff",
+            "--objective",
+            "finalize git automation handoff",
+            "--repo-name",
+            "CogniSpace",
+            "--risk-level",
+            "HIGH",
+            "--meta-squared",
+            "PATCH",
+            "--no-run-tests",
+            "--pathspec",
+            "backend/app/cli.py",
+            "--no-push-branch",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    handoff_payload = _read_json_output(capsys)
+    assert handoff_payload["status"] == "DRY_RUN"
+    assert handoff_payload["dry_run"] is True
+    assert handoff_payload["pathspec"] == ["backend/app/cli.py"]
+    assert handoff_payload["summary"]["steps_planned"] >= 1
+    assert any(step["step_id"] == "create_feature_branch" for step in handoff_payload["steps"])
 
 
 def test_cli_missing_dependency_returns_actionable_error(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001

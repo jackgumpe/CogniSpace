@@ -30,6 +30,7 @@ REQUIRED_DEPENDENCIES = [
     "orjson",
     "sqlalchemy",
     "alembic",
+    "psycopg",
     "redis",
     "httpx",
     "jsonschema",
@@ -59,15 +60,29 @@ def _dos_help_text() -> str:
         "",
         "TEAM PROCESS",
         "  TEAM GATHER-DEFAULT [--TASK-DESCRIPTION \"...\"] [--NO-INTERNAL-DIALOGUE] [--OUTPUT-JSON]",
+        "  TEAM GATHER-GITOPS [--TASK-DESCRIPTION \"...\"] [--NO-INTERNAL-DIALOGUE] [--OUTPUT-JSON]",
         "  TEAM VALIDATE-DEFAULT [--OUTPUT-JSON]",
         "  TEAM PREPLAN --TASK-KEY <key> --TASK-DESCRIPTION \"...\" [--HORIZON-CARDS N]",
         "               [--NO-RISK-MATRIX] [--SESSION-ID <id>] [--TRACE-ID <id>] [--OUTPUT-JSON]",
+        "  TEAM LIVE --TASK-KEY <key> --TASK-DESCRIPTION \"...\" [--TURNS N] [--DEBATE-MODE SYNC|ASYNC|MIXED]",
+        "            [--NO-COUNTERARGUMENTS] [--STREAM-DELAY-MS N] [--SESSION-ID <id>] [--TRACE-ID <id>]",
+        "            [--OUTPUT-JSON]",
         "",
         "GITOPS",
         "  GITOPS SNAPSHOT [--OUTPUT-JSON]",
         "  GITOPS ADVISE --OBJECTIVE \"...\" [--CHANGES-SUMMARY \"...\"] [--RISK-LEVEL LOW|MEDIUM|HIGH]",
         "                [--COLLABORATION-MODE SOLO|TEAM] [--INCLUDE-BOOTSTRAP-PLAN]",
         "                [--REPO-NAME CogniSpace] [--REMOTE-URL <url>] [--OUTPUT-JSON]",
+        "  GITOPS META-PLAN --OBJECTIVE \"...\" [--REPO-NAME CogniSpace] [--NO-HF-SCAN] [--OUTPUT-JSON]",
+        "                   [--RISK-LEVEL LOW|MEDIUM|HIGH] [--META-SQUARED OFF|PATCH]",
+        "  GITOPS HANDOFF --OBJECTIVE \"...\" [--EXECUTE] [--RISK-LEVEL LOW|MEDIUM|HIGH]",
+        "                 [--META-SQUARED OFF|PATCH] [--NO-RUN-TESTS] [--TEST-COMMAND \"...\"]",
+        "                 [--PATHSPEC <repo/path> --PATHSPEC <repo/path> ...]",
+        "                 [--NO-PUSH-BRANCH] [--CREATE-PR] [--INCLUDE-BOOTSTRAP]",
+        "                 [--BOOTSTRAP-REPO owner/name] [--RESOURCE-GROUP <rg>] [--LOCATION <loc>]",
+        "                 [--ACR-NAME <acr>] [--CONTAINER-APP-ENVIRONMENT <name>]",
+        "                 [--CONTAINER-APP-NAME <name>] [--STATIC-WEB-APP-NAME <name>]",
+        "                 [--DEPLOY-DATABASE-URL <url>] [--TRIGGER-WORKFLOWS] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -117,6 +132,7 @@ def _create_runtime(args: argparse.Namespace) -> Runtime:
         log_dir=args.log_dir,
         dataset_dir=args.dataset_dir,
         scoring_profile_path=args.scoring_profile_path,
+        database_url=args.database_url,
     )
     return Runtime(
         event_store=app.state.event_store,
@@ -353,6 +369,16 @@ def _run_team_gather_default(args: argparse.Namespace, runtime: Runtime) -> int:
     return 0 if report.get("default_process_active", False) else 2
 
 
+def _run_team_gather_gitops(args: argparse.Namespace, runtime: Runtime) -> int:
+    report = runtime.dev_team_orchestrator.gather_gitops_team(
+        task_description=args.task_description,
+        preferred_providers=["GEMINI", "CLAUDE", "CODEX"],
+        include_internal_dialogue=not args.no_internal_dialogue,
+    )
+    _emit(report, as_json=args.output_json)
+    return 0 if report.get("default_process_active", False) else 2
+
+
 def _run_team_validate_default(args: argparse.Namespace, runtime: Runtime) -> int:
     report = runtime.dev_team_orchestrator.gather_default_team()
     payload = {
@@ -379,6 +405,49 @@ def _run_team_preplan(args: argparse.Namespace, runtime: Runtime) -> int:
     )
     result = runtime.dev_team_orchestrator.preplan(request)
     _emit(result.model_dump(mode="json"), as_json=args.output_json)
+    return 0
+
+
+def _run_team_live(args: argparse.Namespace, runtime: Runtime) -> int:
+    from app.models.dev_team import StartLiveDevTeamRunRequest
+
+    request = StartLiveDevTeamRunRequest(
+        task_key=args.task_key,
+        task_description=args.task_description,
+        turns=args.turns,
+        debate_mode=args.debate_mode,
+        include_counterarguments=not args.no_counterarguments,
+        stream_delay_ms=args.stream_delay_ms,
+        session_id=args.session_id,
+        trace_id=args.trace_id,
+    )
+    result = runtime.dev_team_orchestrator.start_live_run(request)
+    payload = result.model_dump(mode="json")
+
+    if args.output_json:
+        _emit(payload, as_json=True)
+        return 0
+
+    print(f"RUN_ID: {payload['run_id']}")
+    print(f"TEAM_ID: {payload['team_id']}")
+    print(f"SESSION_ID: {payload['session_id']}")
+    print(f"ATTENDANCE_COUNT: {len(payload['attendance'])}")
+    for row in payload["attendance"]:
+        print(
+            f"  PING {row['agent_role']}:{row['agent_id']} status={row['status']} "
+            f"latency_ms={row['ping_ms']}"
+        )
+    print(f"MESSAGE_COUNT: {payload['total_messages']}")
+    for row in payload["messages"]:
+        print(
+            f"[{row['sequence']:02d}] {row['agent_id']} {row['message_type']}: "
+            f"{row.get('outward_prose', row['text'])} (confidence={row['confidence']})"
+        )
+        frame = row.get("public_reasoning", {})
+        if frame:
+            print(f"    claim: {frame.get('claim', '-')}")
+            print(f"    risk: {frame.get('risk', '-')}")
+            print(f"    next: {frame.get('next_step', '-')}")
     return 0
 
 
@@ -484,6 +553,64 @@ def _run_gitops_advise(args: argparse.Namespace, runtime: Runtime) -> int:
     return 0
 
 
+def _run_gitops_meta_plan(args: argparse.Namespace, runtime: Runtime) -> int:
+    from app.models.gitops import GitMetaPlanRequest
+
+    request = GitMetaPlanRequest(
+        objective=args.objective,
+        repo_name=args.repo_name,
+        risk_level=args.risk_level,
+        include_hf_scan=not args.no_hf_scan,
+        meta_squared_mode=args.meta_squared,
+    )
+    payload = runtime.gitops_advisor.meta_plan(request).model_dump(mode="json")
+    _emit(payload, as_json=args.output_json)
+    return 0
+
+
+def _run_gitops_handoff(args: argparse.Namespace, runtime: Runtime) -> int:
+    from app.models.gitops import GitBootstrapConfig, GitHandoffRequest
+
+    include_bootstrap = bool(
+        args.include_bootstrap
+        or args.bootstrap_repo
+        or args.resource_group
+        or args.acr_name
+        or args.trigger_workflows
+    )
+    bootstrap = None
+    if include_bootstrap:
+        bootstrap = GitBootstrapConfig(
+            repo=args.bootstrap_repo,
+            resource_group=args.resource_group,
+            location=args.location,
+            acr_name=args.acr_name,
+            container_app_environment=args.container_app_environment,
+            container_app_name=args.container_app_name,
+            static_web_app_name=args.static_web_app_name,
+            database_url=args.deploy_database_url,
+        )
+    request = GitHandoffRequest(
+        objective=args.objective,
+        repo_name=args.repo_name,
+        risk_level=args.risk_level,
+        meta_squared_mode=args.meta_squared,
+        dry_run=not args.execute,
+        run_tests=not args.no_run_tests,
+        test_command=args.test_command,
+        pathspec=args.pathspec or [],
+        push_branch=not args.no_push_branch,
+        create_pr=args.create_pr,
+        include_bootstrap=include_bootstrap,
+        trigger_workflows=args.trigger_workflows,
+        bootstrap=bootstrap,
+    )
+    result = runtime.gitops_advisor.handoff(request)
+    payload = result.model_dump(mode="json")
+    _emit(payload, as_json=args.output_json)
+    return 0 if result.status in {"DRY_RUN", "SUCCEEDED"} else 2
+
+
 def _normalize_menu_tokens(parts: list[str]) -> list[str]:
     if not parts:
         return parts
@@ -543,6 +670,9 @@ def _run_menu(
                 print("RUNTIME_UNAVAILABLE. Type DEPS CHECK.")
             else:
                 print(f"LOG_DIR: {runtime.event_store.base_dir}")
+                print(f"LOG_BACKEND: {getattr(runtime.event_store, 'backend_name', 'unknown')}")
+                if getattr(runtime.event_store, "database_url", None):
+                    print(f"DATABASE_URL: {runtime.event_store.database_url}")
                 print(f"SCORING_PROFILE: {runtime.scoring_profile_store.profile_path}")
             continue
         if upper in {"CLS", "CLEAR"}:
@@ -582,6 +712,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir", default=None)
     parser.add_argument("--dataset-dir", default=None)
     parser.add_argument("--scoring-profile-path", default=None)
+    parser.add_argument("--database-url", default=None)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     health = subparsers.add_parser("health")
@@ -668,6 +799,12 @@ def _build_parser() -> argparse.ArgumentParser:
     team_gather.add_argument("--output-json", action="store_true")
     team_gather.set_defaults(handler=_run_team_gather_default, requires_runtime=True)
 
+    team_gather_gitops = team_sub.add_parser("gather-gitops")
+    team_gather_gitops.add_argument("--task-description", default=None)
+    team_gather_gitops.add_argument("--no-internal-dialogue", action="store_true")
+    team_gather_gitops.add_argument("--output-json", action="store_true")
+    team_gather_gitops.set_defaults(handler=_run_team_gather_gitops, requires_runtime=True)
+
     team_validate = team_sub.add_parser("validate-default")
     team_validate.add_argument("--output-json", action="store_true")
     team_validate.set_defaults(handler=_run_team_validate_default, requires_runtime=True)
@@ -681,6 +818,18 @@ def _build_parser() -> argparse.ArgumentParser:
     team_preplan.add_argument("--trace-id", default=None)
     team_preplan.add_argument("--output-json", action="store_true")
     team_preplan.set_defaults(handler=_run_team_preplan, requires_runtime=True)
+
+    team_live = team_sub.add_parser("live")
+    team_live.add_argument("--task-key", required=True)
+    team_live.add_argument("--task-description", required=True)
+    team_live.add_argument("--turns", type=int, default=10)
+    team_live.add_argument("--debate-mode", choices=["SYNC", "ASYNC", "MIXED"], default="MIXED")
+    team_live.add_argument("--no-counterarguments", action="store_true")
+    team_live.add_argument("--stream-delay-ms", type=int, default=40)
+    team_live.add_argument("--session-id", default=None)
+    team_live.add_argument("--trace-id", default=None)
+    team_live.add_argument("--output-json", action="store_true")
+    team_live.set_defaults(handler=_run_team_live, requires_runtime=True)
 
     metrics = autoprompt_sub.add_parser("metrics")
     metrics_sub = metrics.add_subparsers(dest="metrics_command", required=True)
@@ -731,6 +880,42 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_advise.add_argument("--remote-url", default=None)
     gitops_advise.add_argument("--output-json", action="store_true")
     gitops_advise.set_defaults(handler=_run_gitops_advise, requires_runtime=True)
+
+    gitops_meta_plan = gitops_sub.add_parser("meta-plan")
+    gitops_meta_plan.add_argument("--objective", required=True)
+    gitops_meta_plan.add_argument("--repo-name", default="CogniSpace")
+    gitops_meta_plan.add_argument("--risk-level", choices=["LOW", "MEDIUM", "HIGH"], default="MEDIUM")
+    gitops_meta_plan.add_argument("--meta-squared", choices=["OFF", "PATCH"], default="PATCH")
+    gitops_meta_plan.add_argument("--no-hf-scan", action="store_true")
+    gitops_meta_plan.add_argument("--output-json", action="store_true")
+    gitops_meta_plan.set_defaults(handler=_run_gitops_meta_plan, requires_runtime=True)
+
+    gitops_handoff = gitops_sub.add_parser("handoff")
+    gitops_handoff.add_argument("--objective", required=True)
+    gitops_handoff.add_argument("--repo-name", default="CogniSpace")
+    gitops_handoff.add_argument("--risk-level", choices=["LOW", "MEDIUM", "HIGH"], default="HIGH")
+    gitops_handoff.add_argument("--meta-squared", choices=["OFF", "PATCH"], default="PATCH")
+    gitops_handoff.add_argument("--execute", action="store_true")
+    gitops_handoff.add_argument("--no-run-tests", action="store_true")
+    gitops_handoff.add_argument(
+        "--test-command",
+        default="python -m pytest tests/test_gitops_api.py tests/test_gitops_mocking.py tests/test_cli.py -q",
+    )
+    gitops_handoff.add_argument("--pathspec", action="append", default=[])
+    gitops_handoff.add_argument("--no-push-branch", action="store_true")
+    gitops_handoff.add_argument("--create-pr", action="store_true")
+    gitops_handoff.add_argument("--include-bootstrap", action="store_true")
+    gitops_handoff.add_argument("--bootstrap-repo", default=None)
+    gitops_handoff.add_argument("--resource-group", default=None)
+    gitops_handoff.add_argument("--location", default="eastus")
+    gitops_handoff.add_argument("--acr-name", default=None)
+    gitops_handoff.add_argument("--container-app-environment", default="cae-cognispace-dev")
+    gitops_handoff.add_argument("--container-app-name", default="ca-cognispace-backend")
+    gitops_handoff.add_argument("--static-web-app-name", default="swa-cognispace-frontend")
+    gitops_handoff.add_argument("--deploy-database-url", default="sqlite+pysqlite:////tmp/cognispace.db")
+    gitops_handoff.add_argument("--trigger-workflows", action="store_true")
+    gitops_handoff.add_argument("--output-json", action="store_true")
+    gitops_handoff.set_defaults(handler=_run_gitops_handoff, requires_runtime=True)
 
     return parser
 
