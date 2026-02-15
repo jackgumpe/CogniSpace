@@ -8,7 +8,15 @@ from fastapi import APIRouter, Request
 
 from app.core.logging import logger
 from app.models.events import EventEnvelope
-from app.models.gitops import GitAdviceRequest, GitAdviceResponse, GitRepoSnapshot
+from app.models.gitops import (
+    GitAdviceRequest,
+    GitAdviceResponse,
+    GitHandoffRequest,
+    GitHandoffResponse,
+    GitMetaPlanRequest,
+    GitMetaPlanResponse,
+    GitRepoSnapshot,
+)
 from app.services.autoprompt.gitops import GitOpsAdvisor
 from app.services.logging.event_store import EventStore
 
@@ -86,3 +94,73 @@ async def advise_git_workflow(
     )
     await _safe_emit(request, "LOG_EVENT", event.model_dump(mode="json"))
     return advice
+
+
+@router.post("/meta-plan", response_model=GitMetaPlanResponse)
+async def build_git_meta_plan(
+    payload: GitMetaPlanRequest,
+    request: Request,
+) -> GitMetaPlanResponse:
+    plan = _advisor(request).meta_plan(payload)
+    event = _event_store(request).append_event(
+        _event(
+            session_id=plan.session_id,
+            trace_id=plan.trace_id,
+            event_type="GITOPS_META_PLAN_CREATED",
+            payload={
+                "plan_id": plan.plan_id,
+                "objective": plan.objective,
+                "metric_count": len(plan.meta_metrics),
+                "specialist_count": len(plan.specialist_team),
+                "repo_snapshot": plan.repo_snapshot.model_dump(mode="json"),
+            },
+        )
+    )
+    await _safe_emit(
+        request,
+        "GITOPS_META_PLAN",
+        {
+            "plan_id": plan.plan_id,
+            "metric_count": len(plan.meta_metrics),
+        },
+    )
+    await _safe_emit(request, "LOG_EVENT", event.model_dump(mode="json"))
+    return plan
+
+
+@router.post("/handoff", response_model=GitHandoffResponse)
+async def run_git_handoff(
+    payload: GitHandoffRequest,
+    request: Request,
+) -> GitHandoffResponse:
+    result = _advisor(request).handoff(payload)
+    event = _event_store(request).append_event(
+        _event(
+            session_id=result.session_id,
+            trace_id=result.trace_id,
+            event_type="GITOPS_HANDOFF_COMPLETED",
+            payload={
+                "handoff_id": result.handoff_id,
+                "objective": result.objective,
+                "status": result.status,
+                "dry_run": result.dry_run,
+                "pathspec": result.pathspec,
+                "summary": result.summary,
+                "branch_name": result.branch_name,
+            },
+        )
+    )
+    await _safe_emit(
+        request,
+        "GITOPS_HANDOFF",
+        {
+            "handoff_id": result.handoff_id,
+            "status": result.status,
+            "dry_run": result.dry_run,
+            "pathspec_count": len(result.pathspec),
+            "steps_total": result.summary.get("steps_total", 0),
+            "steps_failed": result.summary.get("steps_failed", 0),
+        },
+    )
+    await _safe_emit(request, "LOG_EVENT", event.model_dump(mode="json"))
+    return result
