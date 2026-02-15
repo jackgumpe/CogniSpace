@@ -184,6 +184,7 @@ def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # n
     assert "TEAM GATHER-GITOPS" in out
     assert "GITOPS ADVISE" in out
     assert "GITOPS META-PLAN" in out
+    assert "GITOPS PR-OPEN" in out
 
 
 def test_cli_team_live_outputs_public_reasoning_transcript(tmp_path: Path, capsys) -> None:  # noqa: ANN001
@@ -378,3 +379,84 @@ def test_cli_missing_dependency_returns_actionable_error(tmp_path: Path, capsys,
     assert any("pip install -e .[dev]" in step for step in payload["fix"])
     assert payload["correction_agent"]["action_code"] == "DEPENDENCY_REPAIR"
     assert payload["correction_agent"]["should_autoprompt"] is True
+
+
+def test_cli_gitops_pr_open_returns_existing_without_runtime(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    def _fake_find_gh() -> str:
+        return "gh"
+
+    def _fake_run_process(command, *, cwd=None):  # noqa: ANN001, ARG001
+        if command[:3] == ["gh", "pr", "list"]:
+            return cli_module.subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout='[{"number": 2, "url": "https://github.com/jackgumpe/CogniSpace/pull/2"}]',
+                stderr="",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(cli_module, "_find_gh_executable", _fake_find_gh)
+    monkeypatch.setattr(cli_module, "_run_process", _fake_run_process)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "pr-open",
+            "--head",
+            "feature/pathspec-safe-handoff-20260215",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["status"] == "exists"
+    assert payload["url"].endswith("/pull/2")
+
+
+def test_cli_gitops_pr_open_auth_required_is_actionable(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    def _fake_find_gh() -> str:
+        return "gh"
+
+    def _fake_run_process(command, *, cwd=None):  # noqa: ANN001, ARG001
+        if command[:3] == ["gh", "pr", "list"]:
+            return cli_module.subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="[]",
+                stderr="",
+            )
+        if command[:3] == ["gh", "pr", "create"]:
+            return cli_module.subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr="To get started with GitHub CLI, please run: gh auth login",
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(cli_module, "_find_gh_executable", _fake_find_gh)
+    monkeypatch.setattr(cli_module, "_run_process", _fake_run_process)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "pr-open",
+            "--head",
+            "feature/pathspec-safe-handoff-20260215",
+            "--output-json",
+        ]
+    )
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "GH_AUTH_REQUIRED"
+    assert any("auth login" in row for row in payload["fix"])

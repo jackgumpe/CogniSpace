@@ -3,7 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import json
+import os
+import re
 import shlex
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -83,6 +88,7 @@ def _dos_help_text() -> str:
         "                 [--ACR-NAME <acr>] [--CONTAINER-APP-ENVIRONMENT <name>]",
         "                 [--CONTAINER-APP-NAME <name>] [--STATIC-WEB-APP-NAME <name>]",
         "                 [--DEPLOY-DATABASE-URL <url>] [--TRIGGER-WORKFLOWS] [--OUTPUT-JSON]",
+        "  GITOPS PR-OPEN [--BASE main] [--HEAD <branch>] [--REPO owner/name] [--TITLE \"...\"] [--BODY \"...\"] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -611,6 +617,188 @@ def _run_gitops_handoff(args: argparse.Namespace, runtime: Runtime) -> int:
     return 0 if result.status in {"DRY_RUN", "SUCCEEDED"} else 2
 
 
+def _find_gh_executable() -> str | None:
+    gh_path = shutil.which("gh")
+    if gh_path:
+        return gh_path
+
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles", ""), "GitHub CLI", "gh.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "GitHub CLI", "gh.exe"),
+        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "GitHub CLI", "gh.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _run_process(command: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _run_gitops_pr_open(args: argparse.Namespace, runtime: Runtime) -> int:
+    del runtime
+
+    gh_exe = _find_gh_executable()
+    if not gh_exe:
+        _emit(
+            {
+                "status": "error",
+                "error_code": "GH_NOT_FOUND",
+                "message": "GitHub CLI was not found on PATH.",
+                "fix": [
+                    "Install GitHub CLI: https://cli.github.com/",
+                    "Or add C:\\Program Files\\GitHub CLI to PATH.",
+                ],
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    head_branch = (args.head or "").strip()
+    if not head_branch:
+        branch_proc = _run_process(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        if branch_proc.returncode != 0:
+            _emit(
+                {
+                    "status": "error",
+                    "error_code": "GIT_BRANCH_DETECT_FAILED",
+                    "message": "Could not detect current git branch.",
+                    "stderr": branch_proc.stderr.strip() or None,
+                },
+                as_json=args.output_json,
+            )
+            return 2
+        head_branch = branch_proc.stdout.strip()
+
+    list_command = [
+        gh_exe,
+        "pr",
+        "list",
+        "--state",
+        "open",
+        "--base",
+        args.base,
+        "--head",
+        head_branch,
+        "--json",
+        "number,url",
+        "--limit",
+        "1",
+    ]
+    if args.repo:
+        list_command.extend(["--repo", args.repo])
+
+    existing_proc = _run_process(list_command)
+    if existing_proc.returncode == 0:
+        try:
+            existing = json.loads(existing_proc.stdout or "[]")
+        except json.JSONDecodeError:
+            existing = []
+        if isinstance(existing, list) and existing:
+            row = existing[0] if isinstance(existing[0], dict) else {}
+            _emit(
+                {
+                    "status": "exists",
+                    "base": args.base,
+                    "head": head_branch,
+                    "url": row.get("url"),
+                    "number": row.get("number"),
+                    "repo": args.repo,
+                },
+                as_json=args.output_json,
+            )
+            return 0
+
+    create_command = [
+        gh_exe,
+        "pr",
+        "create",
+        "--base",
+        args.base,
+        "--head",
+        head_branch,
+    ]
+    if args.repo:
+        create_command.extend(["--repo", args.repo])
+    if args.draft:
+        create_command.append("--draft")
+    if args.title or args.body:
+        create_command.extend(["--title", args.title or f"PR: {head_branch}"])
+        create_command.extend(["--body", args.body or "Automated PR via cogni-backend gitops pr-open."])
+    else:
+        create_command.append("--fill")
+
+    create_proc = _run_process(create_command)
+    combined = f"{create_proc.stdout}\n{create_proc.stderr}".strip()
+    url_match = re.search(r"https://github\.com/\S+/pull/\d+", combined)
+    pr_url = url_match.group(0) if url_match else None
+
+    if create_proc.returncode != 0:
+        lowered = combined.lower()
+        if "gh auth login" in lowered or "gh_token" in lowered or "authentication" in lowered:
+            _emit(
+                {
+                    "status": "error",
+                    "error_code": "GH_AUTH_REQUIRED",
+                    "message": "GitHub CLI is not authenticated.",
+                    "fix": [
+                        '& "C:\\Program Files\\GitHub CLI\\gh.exe" auth login --hostname github.com --git-protocol https --web',
+                        'or set GH_TOKEN for this session before running pr-open.',
+                    ],
+                    "stderr": create_proc.stderr.strip() or None,
+                },
+                as_json=args.output_json,
+            )
+            return 2
+        if "already exists" in lowered and pr_url:
+            _emit(
+                {
+                    "status": "exists",
+                    "base": args.base,
+                    "head": head_branch,
+                    "url": pr_url,
+                    "repo": args.repo,
+                },
+                as_json=args.output_json,
+            )
+            return 0
+
+        _emit(
+            {
+                "status": "error",
+                "error_code": "PR_CREATE_FAILED",
+                "message": "Failed to create pull request.",
+                "stderr": create_proc.stderr.strip() or None,
+                "stdout": create_proc.stdout.strip() or None,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    _emit(
+        {
+            "status": "created",
+            "base": args.base,
+            "head": head_branch,
+            "url": pr_url or create_proc.stdout.strip() or None,
+            "repo": args.repo,
+            "draft": args.draft,
+        },
+        as_json=args.output_json,
+    )
+    return 0
+
+
 def _normalize_menu_tokens(parts: list[str]) -> list[str]:
     if not parts:
         return parts
@@ -916,6 +1104,16 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_handoff.add_argument("--trigger-workflows", action="store_true")
     gitops_handoff.add_argument("--output-json", action="store_true")
     gitops_handoff.set_defaults(handler=_run_gitops_handoff, requires_runtime=True)
+
+    gitops_pr_open = gitops_sub.add_parser("pr-open")
+    gitops_pr_open.add_argument("--base", default="main")
+    gitops_pr_open.add_argument("--head", default=None)
+    gitops_pr_open.add_argument("--repo", default=None)
+    gitops_pr_open.add_argument("--title", default=None)
+    gitops_pr_open.add_argument("--body", default=None)
+    gitops_pr_open.add_argument("--draft", action="store_true")
+    gitops_pr_open.add_argument("--output-json", action="store_true")
+    gitops_pr_open.set_defaults(handler=_run_gitops_pr_open, requires_runtime=False)
 
     return parser
 
