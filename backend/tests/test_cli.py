@@ -745,3 +745,83 @@ def test_cli_gitops_meta_iterate_compares_with_previous_iteration(tmp_path: Path
     persisted = json.loads(store_path.read_text(encoding="utf-8"))
     assert len(persisted["history"]) == 2
     assert persisted["history"][-1]["iteration"] == "v2"
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_runs_selected_backlog(  # noqa: ANN001
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+    calls: list[dict] = []
+
+    def _fake_create_runtime(_args):  # noqa: ANN001
+        return SimpleNamespace()
+
+    def _fake_execute(runtime, **kwargs):  # noqa: ANN001, ARG001
+        calls.append(kwargs)
+        return {
+            "run_id": f"run_{len(calls)}",
+            "task_key": kwargs["task_key"],
+            "status": "SUCCEEDED",
+            "best_prompt_version": "pv_demo",
+            "metrics": {"termination_reason": "plateau"},
+            "budget_usage": {"iterations_used": 1},
+        }
+
+    monkeypatch.setattr(cli_module, "_create_runtime", _fake_create_runtime)
+    monkeypatch.setattr(cli_module, "_execute_autoprompt_job", _fake_execute)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--top-k",
+            "2",
+            "--autoprompt-run",
+            "--autoprompt-execute",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["autoprompt_execution"]["mode"] == "execute_runs"
+    assert payload["autoprompt_execution"]["executed_runs"] == 2
+    assert payload["autoprompt_execution"]["succeeded_runs"] == 2
+    assert payload["autoprompt_execution"]["failed_runs"] == 0
+    assert len(calls) == 2
+    assert calls[0]["task_key"].startswith("gitops_meta_")
+    assert calls[0]["max_iterations"] == 3
+    assert calls[0]["max_tokens"] == 5000
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_missing_dependency_returns_actionable_error(  # noqa: ANN001
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    def _raise_missing(_args):  # noqa: ANN001
+        raise ModuleNotFoundError("No module named 'jsonschema'")
+
+    monkeypatch.setattr(cli_module, "_create_runtime", _raise_missing)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--autoprompt-execute",
+            "--output-json",
+        ]
+    )
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "MISSING_DEPENDENCY"
+    assert payload["missing_module"] == "jsonschema"

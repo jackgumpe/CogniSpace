@@ -144,7 +144,7 @@ def _dos_help_text() -> str:
         "              [--NO-RUN-TESTS] [--BASE main] [--HEAD <branch>] [--OUTPUT-JSON]",
         "  GITOPS SYNC-MAIN [--MAIN-BRANCH main] [--REMOTE origin] [--PRUNE] [--OUTPUT-JSON]",
         "  GITOPS META-ITERATE [--FEATURES-FILE path.json] [--STORE-PATH path.json] [--TOP-K N]",
-        "                      [--AUTOPROMPT-RUN] [--OUTPUT-JSON]",
+        "                      [--AUTOPROMPT-RUN] [--AUTOPROMPT-EXECUTE] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -348,24 +348,38 @@ def _run_logs_global_analysis(args: argparse.Namespace, runtime: Runtime) -> int
     return 0
 
 
-def _run_autoprompt_run(args: argparse.Namespace, runtime: Runtime) -> int:
+def _execute_autoprompt_job(
+    runtime: Runtime,
+    *,
+    task_key: str,
+    prompt: str,
+    session_id: str | None,
+    trace_id: str | None,
+    max_iterations: int,
+    max_tokens: int,
+    max_cost_usd: float,
+    timeout_seconds: int,
+    required_keywords: list[str],
+    forbidden_patterns: list[str],
+    min_similarity: float,
+) -> dict[str, Any]:
     from app.models.autoprompt import BudgetConfig, CreateAutopromptRunRequest, DriftConstraints
 
     constraints = DriftConstraints(
-        required_keywords=args.required_keyword or [],
-        forbidden_patterns=args.forbidden_pattern or [],
-        min_similarity=args.min_similarity,
+        required_keywords=required_keywords,
+        forbidden_patterns=forbidden_patterns,
+        min_similarity=min_similarity,
     )
     payload = CreateAutopromptRunRequest(
-        task_key=args.task_key,
-        baseline_prompt=args.prompt,
-        session_id=args.session_id,
-        trace_id=args.trace_id,
+        task_key=task_key,
+        baseline_prompt=prompt,
+        session_id=session_id,
+        trace_id=trace_id,
         budget=BudgetConfig(
-            max_iterations=args.max_iterations,
-            max_tokens=args.max_tokens,
-            max_cost_usd=args.max_cost_usd,
-            timeout_seconds=args.timeout_seconds,
+            max_iterations=max_iterations,
+            max_tokens=max_tokens,
+            max_cost_usd=max_cost_usd,
+            timeout_seconds=timeout_seconds,
         ),
         constraints=constraints,
     )
@@ -417,6 +431,24 @@ def _run_autoprompt_run(args: argparse.Namespace, runtime: Runtime) -> int:
             finished.best_candidate.model_dump(mode="json") if finished.best_candidate is not None else None
         ),
     }
+    return result
+
+
+def _run_autoprompt_run(args: argparse.Namespace, runtime: Runtime) -> int:
+    result = _execute_autoprompt_job(
+        runtime,
+        task_key=args.task_key,
+        prompt=args.prompt,
+        session_id=args.session_id,
+        trace_id=args.trace_id,
+        max_iterations=args.max_iterations,
+        max_tokens=args.max_tokens,
+        max_cost_usd=args.max_cost_usd,
+        timeout_seconds=args.timeout_seconds,
+        required_keywords=args.required_keyword or [],
+        forbidden_patterns=args.forbidden_pattern or [],
+        min_similarity=args.min_similarity,
+    )
     _emit(result, as_json=args.output_json)
     return 0
 
@@ -828,7 +860,7 @@ def _meta_iterate_autoprompt_command(task_key: str, prompt: str, feature_name: s
 
 
 def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
-    del runtime
+    exit_code = 0
 
     if args.features_file:
         try:
@@ -1013,7 +1045,7 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
         "generated_at": datetime.now(UTC).isoformat(),
     }
 
-    if args.autoprompt_run:
+    if args.autoprompt_run or args.autoprompt_execute:
         command_rows: list[dict[str, str]] = []
         for row in selected:
             feature_name = str(row["feature"])
@@ -1040,6 +1072,83 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
             "commands": command_rows,
         }
 
+    if args.autoprompt_execute:
+        execute_runtime = runtime
+        if execute_runtime is None:
+            try:
+                execute_runtime = _create_runtime(args)
+            except ModuleNotFoundError as exc:
+                _emit(_missing_dependency_payload(exc), as_json=args.output_json)
+                return 2
+        if execute_runtime is None:
+            _emit(
+                {
+                    "status": "error",
+                    "error_code": "RUNTIME_UNAVAILABLE",
+                    "message": "Runtime is not initialized. Run 'deps check' and install missing packages.",
+                },
+                as_json=args.output_json,
+            )
+            return 2
+
+        command_rows = payload.get("autoprompt_run_plan", {}).get("commands", [])
+        execution_rows: list[dict[str, Any]] = []
+        execution_session_id = f"sess_meta_iterate_exec_{uuid4().hex[:10]}"
+
+        for row in command_rows:
+            feature_name = str(row.get("feature", "feature"))
+            task_key = str(row.get("task_key", _meta_iterate_task_key(feature_name)))
+            prompt_text = str(row.get("prompt", ""))
+            trace_id = f"trace_meta_iterate_exec_{uuid4().hex[:10]}"
+            try:
+                run_result = _execute_autoprompt_job(
+                    execute_runtime,
+                    task_key=task_key,
+                    prompt=prompt_text,
+                    session_id=execution_session_id,
+                    trace_id=trace_id,
+                    max_iterations=args.execute_max_iterations,
+                    max_tokens=args.execute_max_tokens,
+                    max_cost_usd=args.execute_max_cost_usd,
+                    timeout_seconds=args.execute_timeout_seconds,
+                    required_keywords=["tests", "rollback", feature_name],
+                    forbidden_patterns=[],
+                    min_similarity=args.execute_min_similarity,
+                )
+                execution_rows.append(
+                    {
+                        "feature": feature_name,
+                        "task_key": task_key,
+                        "run_id": run_result.get("run_id"),
+                        "status": run_result.get("status"),
+                        "best_prompt_version": run_result.get("best_prompt_version"),
+                        "metrics": run_result.get("metrics"),
+                        "budget_usage": run_result.get("budget_usage"),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                execution_rows.append(
+                    {
+                        "feature": feature_name,
+                        "task_key": task_key,
+                        "status": "ERROR",
+                        "error": str(exc),
+                    }
+                )
+
+        succeeded_runs = sum(1 for row in execution_rows if row.get("status") == "SUCCEEDED")
+        failed_runs = len(execution_rows) - succeeded_runs
+        payload["autoprompt_execution"] = {
+            "mode": "execute_runs",
+            "execution_session_id": execution_session_id,
+            "executed_runs": len(execution_rows),
+            "succeeded_runs": succeeded_runs,
+            "failed_runs": failed_runs,
+            "runs": execution_rows,
+        }
+        if failed_runs > 0:
+            exit_code = 2
+
     history.append(payload)
     try:
         parent_dir = os.path.dirname(store_path)
@@ -1061,7 +1170,7 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
         return 2
 
     _emit(payload, as_json=args.output_json)
-    return 0
+    return exit_code
 
 
 def _gitops_pr_open_result(
@@ -1776,6 +1885,12 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_meta_iterate.add_argument("--top-k", type=int, default=3)
     gitops_meta_iterate.add_argument("--reset-store", action="store_true")
     gitops_meta_iterate.add_argument("--autoprompt-run", action="store_true")
+    gitops_meta_iterate.add_argument("--autoprompt-execute", action="store_true")
+    gitops_meta_iterate.add_argument("--execute-max-iterations", type=int, default=3)
+    gitops_meta_iterate.add_argument("--execute-max-tokens", type=int, default=5000)
+    gitops_meta_iterate.add_argument("--execute-max-cost-usd", type=float, default=1.0)
+    gitops_meta_iterate.add_argument("--execute-timeout-seconds", type=int, default=30)
+    gitops_meta_iterate.add_argument("--execute-min-similarity", type=float, default=0.25)
     gitops_meta_iterate.add_argument("--output-json", action="store_true")
     gitops_meta_iterate.set_defaults(handler=_run_gitops_meta_iterate, requires_runtime=False)
 
