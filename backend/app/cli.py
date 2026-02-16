@@ -41,6 +41,57 @@ REQUIRED_DEPENDENCIES = [
     "jsonschema",
 ]
 
+_META_ITERATE_WEIGHTS_V1 = {
+    "impact": 0.35,
+    "automation_gain": 0.20,
+    "operability": 0.15,
+    "testability": 0.15,
+    "risk_inverse": 0.15,
+}
+
+_DEFAULT_META_ITERATE_FEATURES_V1 = [
+    {
+        "feature": "gitops_ship_profiles",
+        "impact": 9.5,
+        "automation_gain": 9.2,
+        "operability": 8.8,
+        "testability": 8.7,
+        "risk": 3.2,
+    },
+    {
+        "feature": "repo_default_config_file",
+        "impact": 8.9,
+        "automation_gain": 8.5,
+        "operability": 8.4,
+        "testability": 8.1,
+        "risk": 3.6,
+    },
+    {
+        "feature": "gitops_doctor",
+        "impact": 8.4,
+        "automation_gain": 7.9,
+        "operability": 9.1,
+        "testability": 8.3,
+        "risk": 2.8,
+    },
+    {
+        "feature": "json_output_contract_v2",
+        "impact": 7.8,
+        "automation_gain": 7.2,
+        "operability": 8.7,
+        "testability": 8.6,
+        "risk": 3.1,
+    },
+    {
+        "feature": "dos_menu_shortcuts",
+        "impact": 6.9,
+        "automation_gain": 6.4,
+        "operability": 7.5,
+        "testability": 7.1,
+        "risk": 2.4,
+    },
+]
+
 
 def _dos_help_text() -> str:
     lines = [
@@ -92,6 +143,7 @@ def _dos_help_text() -> str:
         "  GITOPS SHIP --OBJECTIVE \"...\" --PATHSPEC <repo/path> [--PATHSPEC <repo/path> ...]",
         "              [--NO-RUN-TESTS] [--BASE main] [--HEAD <branch>] [--OUTPUT-JSON]",
         "  GITOPS SYNC-MAIN [--MAIN-BRANCH main] [--REMOTE origin] [--PRUNE] [--OUTPUT-JSON]",
+        "  GITOPS META-ITERATE [--FEATURES-FILE path.json] [--STORE-PATH path.json] [--TOP-K N] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -646,6 +698,301 @@ def _run_process(command: list[str], *, cwd: str | None = None) -> subprocess.Co
         errors="replace",
         check=False,
     )
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def _default_meta_iterate_store_path() -> str:
+    repo_root_proc = _run_process(["git", "rev-parse", "--show-toplevel"])
+    repo_root = (repo_root_proc.stdout or "").strip() if repo_root_proc.returncode == 0 else os.getcwd()
+    return os.path.join(repo_root, ".cogni", "meta_iterations.json")
+
+
+def _normalize_meta_iterate_features(raw_payload: Any) -> tuple[list[dict[str, float | str]], list[str]]:
+    payload = raw_payload
+    if isinstance(payload, dict):
+        if isinstance(payload.get("features"), list):
+            payload = payload["features"]
+        elif isinstance(payload.get("feature_metrics"), list):
+            payload = payload["feature_metrics"]
+    if not isinstance(payload, list):
+        return [], ["Feature payload must be a JSON array."]
+
+    errors: list[str] = []
+    normalized: list[dict[str, float | str]] = []
+    seen: set[str] = set()
+    required_numeric = ["impact", "automation_gain", "operability", "testability", "risk"]
+    for idx, row in enumerate(payload):
+        if not isinstance(row, dict):
+            errors.append(f"Feature at index {idx} must be an object.")
+            continue
+        feature = str(row.get("feature", "")).strip()
+        if not feature:
+            errors.append(f"Feature at index {idx} is missing 'feature'.")
+            continue
+        if feature in seen:
+            errors.append(f"Duplicate feature '{feature}'.")
+            continue
+        seen.add(feature)
+
+        parsed: dict[str, float | str] = {"feature": feature}
+        for key in required_numeric:
+            raw_value = row.get(key)
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                errors.append(f"Feature '{feature}' has invalid numeric value for '{key}'.")
+                continue
+            if value < 0 or value > 10:
+                errors.append(f"Feature '{feature}' field '{key}' must be between 0 and 10.")
+                continue
+            parsed[key] = round(value, 4)
+        if all(key in parsed for key in required_numeric):
+            normalized.append(parsed)
+
+    return normalized, errors
+
+
+def _meta_iterate_score(feature: dict[str, float | str]) -> float:
+    impact = float(feature["impact"])
+    automation_gain = float(feature["automation_gain"])
+    operability = float(feature["operability"])
+    testability = float(feature["testability"])
+    risk_inverse = 10.0 - float(feature["risk"])
+    score = (
+        _META_ITERATE_WEIGHTS_V1["impact"] * impact
+        + _META_ITERATE_WEIGHTS_V1["automation_gain"] * automation_gain
+        + _META_ITERATE_WEIGHTS_V1["operability"] * operability
+        + _META_ITERATE_WEIGHTS_V1["testability"] * testability
+        + _META_ITERATE_WEIGHTS_V1["risk_inverse"] * risk_inverse
+    )
+    return round(score, 4)
+
+
+def _meta_iterate_ranking_stability(previous_order: list[str], current_order: list[str]) -> float:
+    if not previous_order:
+        return 1.0
+    prev_idx = {name: i for i, name in enumerate(previous_order)}
+    common = [name for name in current_order if name in prev_idx]
+    if not common:
+        return 0.0
+    displacement = sum(abs(prev_idx[name] - idx) for idx, name in enumerate(common))
+    max_disp = max(1, len(previous_order) * len(common))
+    coverage = len(common) / max(len(previous_order), len(current_order), 1)
+    stability = max(0.0, 1.0 - (displacement / max_disp))
+    return round(stability * coverage, 4)
+
+
+def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
+    del runtime
+
+    if args.features_file:
+        try:
+            with open(args.features_file, "r", encoding="utf-8") as fh:
+                raw_features = json.loads(fh.read())
+        except OSError as exc:
+            _emit(
+                {
+                    "status": "error",
+                    "error_code": "META_ITERATE_FEATURE_FILE_READ_FAILED",
+                    "message": f"Could not read features file: {args.features_file}",
+                    "details": str(exc),
+                },
+                as_json=args.output_json,
+            )
+            return 2
+        except json.JSONDecodeError as exc:
+            _emit(
+                {
+                    "status": "error",
+                    "error_code": "META_ITERATE_FEATURE_FILE_INVALID_JSON",
+                    "message": f"Features file is not valid JSON: {args.features_file}",
+                    "details": str(exc),
+                },
+                as_json=args.output_json,
+            )
+            return 2
+    else:
+        raw_features = _DEFAULT_META_ITERATE_FEATURES_V1
+
+    features, feature_errors = _normalize_meta_iterate_features(raw_features)
+    if feature_errors:
+        _emit(
+            {
+                "status": "error",
+                "error_code": "META_ITERATE_INVALID_FEATURES",
+                "message": "Feature metrics payload failed validation.",
+                "errors": feature_errors,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    store_path = args.store_path or _default_meta_iterate_store_path()
+    history: list[dict[str, Any]] = []
+    if not args.reset_store and os.path.exists(store_path):
+        try:
+            with open(store_path, "r", encoding="utf-8") as fh:
+                blob = json.loads(fh.read())
+            if isinstance(blob, dict) and isinstance(blob.get("history"), list):
+                history = blob["history"]
+            elif isinstance(blob, list):
+                history = blob
+        except (OSError, json.JSONDecodeError):
+            history = []
+
+    previous_record = history[-1] if history else None
+    previous_iteration = str(previous_record.get("iteration", "v0")) if isinstance(previous_record, dict) else "v0"
+    previous_scores = {}
+    previous_order: list[str] = []
+    if isinstance(previous_record, dict):
+        prev_rows = previous_record.get("feature_metrics", [])
+        if isinstance(prev_rows, list):
+            for row in prev_rows:
+                if not isinstance(row, dict):
+                    continue
+                name = str(row.get("feature", "")).strip()
+                if not name:
+                    continue
+                try:
+                    previous_scores[name] = float(row.get("score_v1"))
+                except (TypeError, ValueError):
+                    continue
+                previous_order.append(name)
+
+    scored_rows: list[dict[str, Any]] = []
+    for row in features:
+        name = str(row["feature"])
+        score = _meta_iterate_score(row)
+        prev_score = previous_scores.get(name)
+        delta = None if prev_score is None else round(score - prev_score, 4)
+        delta_label = "NEW" if delta is None else f"{delta:+.2f}"
+        scored_rows.append(
+            {
+                "feature": name,
+                "impact": float(row["impact"]),
+                "automation_gain": float(row["automation_gain"]),
+                "operability": float(row["operability"]),
+                "testability": float(row["testability"]),
+                "risk": float(row["risk"]),
+                "score_v1": score,
+                "delta_vs_previous": delta,
+                "delta_label": delta_label,
+            }
+        )
+    scored_rows.sort(key=lambda item: item["score_v1"], reverse=True)
+
+    current_order = [row["feature"] for row in scored_rows]
+    common_deltas = [abs(row["delta_vs_previous"]) for row in scored_rows if row["delta_vs_previous"] is not None]
+    average_score_delta = round(sum(common_deltas) / len(common_deltas), 4) if common_deltas else 0.0
+    ranking_stability = _meta_iterate_ranking_stability(previous_order, current_order)
+    if average_score_delta >= 1.0 or ranking_stability < 0.3:
+        drift_flag = "HIGH"
+    elif average_score_delta >= 0.5 or ranking_stability < 0.6:
+        drift_flag = "MEDIUM"
+    else:
+        drift_flag = "LOW"
+
+    average_risk = round(sum(row["risk"] for row in scored_rows) / max(len(scored_rows), 1), 4)
+    top_score = scored_rows[0]["score_v1"] if scored_rows else 0.0
+    second_score = scored_rows[1]["score_v1"] if len(scored_rows) > 1 else top_score
+    top_gap = max(0.0, top_score - second_score)
+    selection_confidence = _clamp(
+        0.55 + min(top_gap / 4.0, 0.2) + (0.15 * ranking_stability) - (0.10 * (average_risk / 10.0)),
+        0.0,
+        0.99,
+    )
+    rework_risk_projection = _clamp(
+        (0.45 * (average_risk / 10.0)) + (0.35 * (1.0 - ranking_stability)) + (0.20 * min(average_score_delta / 2.0, 1.0)),
+        0.0,
+        1.0,
+    )
+
+    threshold = 8.2
+    if drift_flag == "HIGH":
+        threshold += 0.3
+    elif drift_flag == "MEDIUM":
+        threshold += 0.1
+    elif ranking_stability > 0.8:
+        threshold -= 0.1
+    threshold = round(threshold, 2)
+
+    selected = [row for row in scored_rows if row["score_v1"] >= threshold]
+    if not selected:
+        selected = scored_rows[: max(args.top_k, 1)]
+    selected = selected[: max(args.top_k, 1)]
+    backlog = [f"{idx}) {row['feature']}" for idx, row in enumerate(selected, start=1)]
+
+    average_automation = round(
+        sum(row["automation_gain"] for row in scored_rows) / max(len(scored_rows), 1),
+        4,
+    )
+    tuning_actions: list[str] = []
+    if average_automation < 8.0:
+        tuning_actions.append("Increase automation_gain weight by +0.05 in the next iteration candidate and compare outcomes.")
+    if ranking_stability < 0.6:
+        tuning_actions.append("Freeze top-3 backlog items for one cycle to reduce planning churn.")
+    if rework_risk_projection > 0.35:
+        tuning_actions.append("Raise selection threshold by +0.1 and require rollback notes in generated implementation prompts.")
+    if average_score_delta < 0.25 and ranking_stability > 0.8:
+        tuning_actions.append("Inject one unconventional feature candidate next cycle to avoid local optima.")
+    tuning_actions.append(f"Apply score gate >= {threshold:.2f} for sprint inclusion.")
+
+    iteration_number = len(history) + 1
+    payload = {
+        "iteration": f"v{iteration_number}",
+        "previous_iteration": previous_iteration,
+        "scoring_formula_v1": "score = 0.35*impact + 0.20*automation_gain + 0.15*operability + 0.15*testability + 0.15*(10-risk)",
+        "weights_v1": _META_ITERATE_WEIGHTS_V1,
+        "feature_metrics": scored_rows,
+        "meta_metrics": {
+            "ranking_stability": round(ranking_stability, 4),
+            "average_score_delta": average_score_delta,
+            "drift_flag": drift_flag,
+            "selection_confidence": round(selection_confidence, 4),
+            "rework_risk_projection": round(rework_risk_projection, 4),
+        },
+        "selection_threshold": threshold,
+        "tuning_actions": tuning_actions,
+        "autoprompted_backlog": backlog,
+        "autoprompt_packet": {
+            "system_goal": "maximize automation throughput while minimizing operational risk",
+            "required_outputs": [
+                "implementation diff",
+                "tests",
+                "migration notes",
+                "rollback steps",
+                "metric delta report vs previous iteration",
+            ],
+        },
+        "store_path": store_path,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+
+    history.append(payload)
+    try:
+        parent_dir = os.path.dirname(store_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        with open(store_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"version": "meta_iterate.v1", "history": history}, indent=2))
+    except OSError as exc:
+        _emit(
+            {
+                "status": "error",
+                "error_code": "META_ITERATE_STORE_WRITE_FAILED",
+                "message": f"Could not persist iteration history to: {store_path}",
+                "details": str(exc),
+                "iteration_payload": payload,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    _emit(payload, as_json=args.output_json)
+    return 0
 
 
 def _gitops_pr_open_result(
@@ -1353,6 +1700,14 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_sync_main.add_argument("--prune", action="store_true")
     gitops_sync_main.add_argument("--output-json", action="store_true")
     gitops_sync_main.set_defaults(handler=_run_gitops_sync_main, requires_runtime=False)
+
+    gitops_meta_iterate = gitops_sub.add_parser("meta-iterate")
+    gitops_meta_iterate.add_argument("--features-file", default=None)
+    gitops_meta_iterate.add_argument("--store-path", default=None)
+    gitops_meta_iterate.add_argument("--top-k", type=int, default=3)
+    gitops_meta_iterate.add_argument("--reset-store", action="store_true")
+    gitops_meta_iterate.add_argument("--output-json", action="store_true")
+    gitops_meta_iterate.set_defaults(handler=_run_gitops_meta_iterate, requires_runtime=False)
 
     return parser
 

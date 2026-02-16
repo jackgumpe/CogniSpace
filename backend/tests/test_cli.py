@@ -188,6 +188,7 @@ def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # n
     assert "GITOPS PR-OPEN" in out
     assert "GITOPS SHIP" in out
     assert "GITOPS SYNC-MAIN" in out
+    assert "GITOPS META-ITERATE" in out
 
 
 def test_cli_team_live_outputs_public_reasoning_transcript(tmp_path: Path, capsys) -> None:  # noqa: ANN001
@@ -620,3 +621,123 @@ def test_cli_gitops_sync_main_fetch_failure(tmp_path: Path, capsys, monkeypatch)
     payload = _read_json_output(capsys)
     assert payload["error_code"] == "SYNC_FETCH_FAILED"
     assert payload["steps"][-1]["status"] == "FAILED"
+
+
+def test_cli_gitops_meta_iterate_first_run_persists_history(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    args = _base_args(tmp_path)
+    store_path = tmp_path / "meta" / "iterations.json"
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--store-path",
+            str(store_path),
+            "--top-k",
+            "2",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["iteration"] == "v1"
+    assert payload["previous_iteration"] == "v0"
+    assert payload["store_path"] == str(store_path)
+    assert len(payload["feature_metrics"]) >= 2
+    assert len(payload["autoprompted_backlog"]) == 2
+    assert payload["meta_metrics"]["drift_flag"] in {"LOW", "MEDIUM", "HIGH"}
+
+    persisted = json.loads(store_path.read_text(encoding="utf-8"))
+    assert persisted["version"] == "meta_iterate.v1"
+    assert len(persisted["history"]) == 1
+    assert persisted["history"][0]["iteration"] == "v1"
+
+
+def test_cli_gitops_meta_iterate_compares_with_previous_iteration(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    args = _base_args(tmp_path)
+    store_path = tmp_path / "meta_iterations.json"
+    features_path = tmp_path / "features.json"
+
+    base_features = [
+        {
+            "feature": "gitops_ship_profiles",
+            "impact": 8.0,
+            "automation_gain": 8.0,
+            "operability": 8.0,
+            "testability": 8.0,
+            "risk": 4.0,
+        },
+        {
+            "feature": "gitops_doctor",
+            "impact": 7.0,
+            "automation_gain": 7.5,
+            "operability": 8.5,
+            "testability": 8.0,
+            "risk": 3.0,
+        },
+    ]
+    features_path.write_text(json.dumps(base_features), encoding="utf-8")
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--store-path",
+            str(store_path),
+            "--features-file",
+            str(features_path),
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    first_payload = _read_json_output(capsys)
+    assert first_payload["iteration"] == "v1"
+
+    changed_features = [
+        {
+            "feature": "gitops_ship_profiles",
+            "impact": 8.8,
+            "automation_gain": 8.4,
+            "operability": 8.3,
+            "testability": 8.2,
+            "risk": 3.2,
+        },
+        {
+            "feature": "gitops_doctor",
+            "impact": 7.2,
+            "automation_gain": 7.3,
+            "operability": 8.7,
+            "testability": 8.5,
+            "risk": 2.6,
+        },
+    ]
+    features_path.write_text(json.dumps(changed_features), encoding="utf-8")
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--store-path",
+            str(store_path),
+            "--features-file",
+            str(features_path),
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    second_payload = _read_json_output(capsys)
+    assert second_payload["iteration"] == "v2"
+    assert second_payload["previous_iteration"] == "v1"
+    assert 0.0 <= second_payload["meta_metrics"]["ranking_stability"] <= 1.0
+    assert second_payload["meta_metrics"]["drift_flag"] in {"LOW", "MEDIUM", "HIGH"}
+
+    metrics_by_name = {row["feature"]: row for row in second_payload["feature_metrics"]}
+    assert metrics_by_name["gitops_ship_profiles"]["delta_vs_previous"] is not None
+    assert metrics_by_name["gitops_doctor"]["delta_vs_previous"] is not None
+
+    persisted = json.loads(store_path.read_text(encoding="utf-8"))
+    assert len(persisted["history"]) == 2
+    assert persisted["history"][-1]["iteration"] == "v2"
