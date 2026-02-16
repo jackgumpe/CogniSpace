@@ -143,7 +143,8 @@ def _dos_help_text() -> str:
         "  GITOPS SHIP --OBJECTIVE \"...\" --PATHSPEC <repo/path> [--PATHSPEC <repo/path> ...]",
         "              [--NO-RUN-TESTS] [--BASE main] [--HEAD <branch>] [--OUTPUT-JSON]",
         "  GITOPS SYNC-MAIN [--MAIN-BRANCH main] [--REMOTE origin] [--PRUNE] [--OUTPUT-JSON]",
-        "  GITOPS META-ITERATE [--FEATURES-FILE path.json] [--STORE-PATH path.json] [--TOP-K N] [--OUTPUT-JSON]",
+        "  GITOPS META-ITERATE [--FEATURES-FILE path.json] [--STORE-PATH path.json] [--TOP-K N]",
+        "                      [--AUTOPROMPT-RUN] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -785,6 +786,47 @@ def _meta_iterate_ranking_stability(previous_order: list[str], current_order: li
     return round(stability * coverage, 4)
 
 
+def _meta_iterate_task_key(feature_name: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", feature_name.lower()).strip("_")
+    return f"gitops_meta_{cleaned}" if cleaned else "gitops_meta_feature"
+
+
+def _meta_iterate_prompt_for_feature(
+    *,
+    feature_name: str,
+    iteration: str,
+    previous_iteration: str,
+    score: float,
+    threshold: float,
+) -> str:
+    lines = [
+        "You are a Senior Backend Engineer implementing a prioritized GitOps automation feature.",
+        f"Feature: {feature_name}",
+        f"Iteration context: {iteration} (previous={previous_iteration})",
+        f"Metric score: {score:.4f} (selection threshold={threshold:.2f})",
+        "Required outputs:",
+        "1. Implementation diff scoped to this feature.",
+        "2. Unit tests and mock-based tests for new behavior.",
+        "3. Migration/ops notes and rollback steps.",
+        "4. Metric delta report vs previous iteration.",
+        "Constraints: keep changes deterministic, testable, and pathspec-safe.",
+    ]
+    return "\n".join(lines)
+
+
+def _meta_iterate_autoprompt_command(task_key: str, prompt: str, feature_name: str) -> str:
+    escaped_prompt = prompt.replace('"', '\\"')
+    escaped_feature = feature_name.replace('"', '\\"')
+    return (
+        f'python -m app.cli autoprompt run --task-key "{task_key}" '
+        f'--prompt "{escaped_prompt}" '
+        '--required-keyword "tests" '
+        '--required-keyword "rollback" '
+        f'--required-keyword "{escaped_feature}" '
+        '--min-similarity 0.25 --output-json'
+    )
+
+
 def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
     del runtime
 
@@ -970,6 +1012,33 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
         "store_path": store_path,
         "generated_at": datetime.now(UTC).isoformat(),
     }
+
+    if args.autoprompt_run:
+        command_rows: list[dict[str, str]] = []
+        for row in selected:
+            feature_name = str(row["feature"])
+            task_key = _meta_iterate_task_key(feature_name)
+            prompt_text = _meta_iterate_prompt_for_feature(
+                feature_name=feature_name,
+                iteration=str(payload["iteration"]),
+                previous_iteration=str(payload["previous_iteration"]),
+                score=float(row["score_v1"]),
+                threshold=float(payload["selection_threshold"]),
+            )
+            command_rows.append(
+                {
+                    "feature": feature_name,
+                    "task_key": task_key,
+                    "prompt": prompt_text,
+                    "command": _meta_iterate_autoprompt_command(task_key, prompt_text, feature_name),
+                }
+            )
+
+        payload["autoprompt_run_plan"] = {
+            "mode": "emit_commands",
+            "generated_commands": len(command_rows),
+            "commands": command_rows,
+        }
 
     history.append(payload)
     try:
@@ -1706,6 +1775,7 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_meta_iterate.add_argument("--store-path", default=None)
     gitops_meta_iterate.add_argument("--top-k", type=int, default=3)
     gitops_meta_iterate.add_argument("--reset-store", action="store_true")
+    gitops_meta_iterate.add_argument("--autoprompt-run", action="store_true")
     gitops_meta_iterate.add_argument("--output-json", action="store_true")
     gitops_meta_iterate.set_defaults(handler=_run_gitops_meta_iterate, requires_runtime=False)
 

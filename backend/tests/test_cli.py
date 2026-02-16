@@ -636,6 +636,7 @@ def test_cli_gitops_meta_iterate_first_run_persists_history(tmp_path: Path, caps
             str(store_path),
             "--top-k",
             "2",
+            "--autoprompt-run",
             "--output-json",
         ]
     )
@@ -647,6 +648,9 @@ def test_cli_gitops_meta_iterate_first_run_persists_history(tmp_path: Path, caps
     assert len(payload["feature_metrics"]) >= 2
     assert len(payload["autoprompted_backlog"]) == 2
     assert payload["meta_metrics"]["drift_flag"] in {"LOW", "MEDIUM", "HIGH"}
+    assert payload["autoprompt_run_plan"]["mode"] == "emit_commands"
+    assert payload["autoprompt_run_plan"]["generated_commands"] == 2
+    assert "autoprompt run" in payload["autoprompt_run_plan"]["commands"][0]["command"]
 
     persisted = json.loads(store_path.read_text(encoding="utf-8"))
     assert persisted["version"] == "meta_iterate.v1"
