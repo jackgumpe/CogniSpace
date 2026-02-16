@@ -187,6 +187,7 @@ def test_cli_help_command_outputs_dos_help(tmp_path: Path, capsys) -> None:  # n
     assert "GITOPS META-PLAN" in out
     assert "GITOPS PR-OPEN" in out
     assert "GITOPS SHIP" in out
+    assert "GITOPS SYNC-MAIN" in out
 
 
 def test_cli_team_live_outputs_public_reasoning_transcript(tmp_path: Path, capsys) -> None:  # noqa: ANN001
@@ -565,3 +566,57 @@ def test_cli_gitops_ship_stops_when_handoff_fails(tmp_path: Path, capsys, monkey
     payload = _read_json_output(capsys)
     assert payload["error_code"] == "SHIP_HANDOFF_FAILED"
     assert payload["handoff"]["status"] == "FAILED"
+
+
+def test_cli_gitops_sync_main_success(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+    calls: list[list[str]] = []
+
+    def _fake_run_process(command, *, cwd=None):  # noqa: ANN001, ARG001
+        calls.append(command)
+        if command == ["git", "rev-parse", "--abbrev-ref", "HEAD"] and len(calls) == 1:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="feature/work\n", stderr="")
+        if command[:2] == ["git", "fetch"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        if command[:2] == ["git", "checkout"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="Switched to branch 'main'\n", stderr="")
+        if command[:3] == ["git", "pull", "--ff-only"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="Already up to date.\n", stderr="")
+        if command[:3] == ["git", "remote", "prune"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+        if command == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="main\n", stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(cli_module, "_run_process", _fake_run_process)
+
+    code = main(args + ["gitops", "sync-main", "--prune", "--output-json"])
+    assert code == 0
+    payload = _read_json_output(capsys)
+    assert payload["status"] == "succeeded"
+    assert payload["current_branch_before"] == "feature/work"
+    assert payload["current_branch_after"] == "main"
+    assert payload["summary"]["steps_failed"] == 0
+
+
+def test_cli_gitops_sync_main_fetch_failure(tmp_path: Path, capsys, monkeypatch) -> None:  # noqa: ANN001
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+
+    def _fake_run_process(command, *, cwd=None):  # noqa: ANN001, ARG001
+        if command == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=0, stdout="feature/work\n", stderr="")
+        if command[:2] == ["git", "fetch"]:
+            return cli_module.subprocess.CompletedProcess(args=command, returncode=1, stdout="", stderr="network error")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(cli_module, "_run_process", _fake_run_process)
+
+    code = main(args + ["gitops", "sync-main", "--output-json"])
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "SYNC_FETCH_FAILED"
+    assert payload["steps"][-1]["status"] == "FAILED"

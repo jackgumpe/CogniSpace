@@ -91,6 +91,7 @@ def _dos_help_text() -> str:
         "  GITOPS PR-OPEN [--BASE main] [--HEAD <branch>] [--REPO owner/name] [--TITLE \"...\"] [--BODY \"...\"] [--OUTPUT-JSON]",
         "  GITOPS SHIP --OBJECTIVE \"...\" --PATHSPEC <repo/path> [--PATHSPEC <repo/path> ...]",
         "              [--NO-RUN-TESTS] [--BASE main] [--HEAD <branch>] [--OUTPUT-JSON]",
+        "  GITOPS SYNC-MAIN [--MAIN-BRANCH main] [--REMOTE origin] [--PRUNE] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -884,6 +885,121 @@ def _run_gitops_ship(args: argparse.Namespace, runtime: Runtime) -> int:
     return 0 if pr_code == 0 else 2
 
 
+def _run_gitops_sync_main(args: argparse.Namespace, runtime: Runtime) -> int:
+    del runtime
+
+    def _step(step_id: str, description: str, command: list[str]) -> dict[str, Any]:
+        proc = _run_process(command)
+        return {
+            "step_id": step_id,
+            "description": description,
+            "command": " ".join(command),
+            "status": "SUCCEEDED" if proc.returncode == 0 else "FAILED",
+            "return_code": proc.returncode,
+            "stdout": (proc.stdout or "").strip() or None,
+            "stderr": (proc.stderr or "").strip() or None,
+        }
+
+    branch_before_proc = _run_process(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    if branch_before_proc.returncode != 0:
+        _emit(
+            {
+                "status": "error",
+                "error_code": "GIT_BRANCH_DETECT_FAILED",
+                "message": "Could not detect current branch before sync.",
+                "stderr": (branch_before_proc.stderr or "").strip() or None,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+    branch_before = (branch_before_proc.stdout or "").strip()
+
+    steps: list[dict[str, Any]] = []
+    steps.append(
+        _step(
+            "fetch_remote",
+            "Fetch latest refs from configured remote.",
+            ["git", "fetch", args.remote],
+        )
+    )
+    if steps[-1]["status"] == "FAILED":
+        _emit(
+            {
+                "status": "error",
+                "error_code": "SYNC_FETCH_FAILED",
+                "current_branch_before": branch_before,
+                "steps": steps,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    steps.append(
+        _step(
+            "checkout_main",
+            "Switch to main branch target.",
+            ["git", "checkout", args.main_branch],
+        )
+    )
+    if steps[-1]["status"] == "FAILED":
+        _emit(
+            {
+                "status": "error",
+                "error_code": "SYNC_CHECKOUT_FAILED",
+                "current_branch_before": branch_before,
+                "steps": steps,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    steps.append(
+        _step(
+            "pull_ff_only",
+            "Fast-forward pull latest main branch state.",
+            ["git", "pull", "--ff-only", args.remote, args.main_branch],
+        )
+    )
+    if steps[-1]["status"] == "FAILED":
+        _emit(
+            {
+                "status": "error",
+                "error_code": "SYNC_PULL_FAILED",
+                "current_branch_before": branch_before,
+                "steps": steps,
+            },
+            as_json=args.output_json,
+        )
+        return 2
+
+    if args.prune:
+        steps.append(
+            _step(
+                "prune_remote",
+                "Prune stale remote-tracking branches.",
+                ["git", "remote", "prune", args.remote],
+            )
+        )
+
+    branch_after_proc = _run_process(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    branch_after = (branch_after_proc.stdout or "").strip() if branch_after_proc.returncode == 0 else None
+    payload = {
+        "status": "succeeded",
+        "current_branch_before": branch_before,
+        "current_branch_after": branch_after,
+        "main_branch": args.main_branch,
+        "remote": args.remote,
+        "steps": steps,
+        "summary": {
+            "steps_total": len(steps),
+            "steps_succeeded": sum(1 for step in steps if step["status"] == "SUCCEEDED"),
+            "steps_failed": sum(1 for step in steps if step["status"] == "FAILED"),
+        },
+    }
+    _emit(payload, as_json=args.output_json)
+    return 0
+
+
 def _normalize_menu_tokens(parts: list[str]) -> list[str]:
     if not parts:
         return parts
@@ -1230,6 +1346,13 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_ship.add_argument("--draft", action="store_true")
     gitops_ship.add_argument("--output-json", action="store_true")
     gitops_ship.set_defaults(handler=_run_gitops_ship, requires_runtime=True)
+
+    gitops_sync_main = gitops_sub.add_parser("sync-main")
+    gitops_sync_main.add_argument("--main-branch", default="main")
+    gitops_sync_main.add_argument("--remote", default="origin")
+    gitops_sync_main.add_argument("--prune", action="store_true")
+    gitops_sync_main.add_argument("--output-json", action="store_true")
+    gitops_sync_main.set_defaults(handler=_run_gitops_sync_main, requires_runtime=False)
 
     return parser
 
