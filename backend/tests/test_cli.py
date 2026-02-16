@@ -825,3 +825,114 @@ def test_cli_gitops_meta_iterate_autoprompt_execute_missing_dependency_returns_a
     payload = _read_json_output(capsys)
     assert payload["error_code"] == "MISSING_DEPENDENCY"
     assert payload["missing_module"] == "jsonschema"
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_retries_after_transient_failure(  # noqa: ANN001
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+    attempts = {"count": 0}
+
+    def _fake_create_runtime(_args):  # noqa: ANN001
+        return SimpleNamespace()
+
+    def _fake_execute(runtime, **kwargs):  # noqa: ANN001, ARG001
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("transient execute error")
+        return {
+            "run_id": "run_retry_ok",
+            "task_key": kwargs["task_key"],
+            "status": "SUCCEEDED",
+            "best_prompt_version": "pv_retry",
+            "metrics": {"termination_reason": "plateau"},
+            "budget_usage": {"iterations_used": 1},
+        }
+
+    monkeypatch.setattr(cli_module, "_create_runtime", _fake_create_runtime)
+    monkeypatch.setattr(cli_module, "_execute_autoprompt_job", _fake_execute)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--top-k",
+            "1",
+            "--autoprompt-run",
+            "--autoprompt-execute",
+            "--autoprompt-execute-retries",
+            "2",
+            "--autoprompt-execute-backoff-ms",
+            "0",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    execution = payload["autoprompt_execution"]
+    assert execution["executed_runs"] == 1
+    assert execution["succeeded_runs"] == 1
+    assert execution["failed_runs"] == 0
+    assert execution["total_retry_count"] == 1
+    run_row = execution["runs"][0]
+    assert run_row["attempts_used"] == 2
+    assert run_row["retry_count"] == 1
+    assert run_row["attempt_logs"][0]["status"] == "ERROR"
+    assert run_row["attempt_logs"][-1]["status"] == "SUCCEEDED"
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_parallel_reports_parallelism(  # noqa: ANN001
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    from app import cli as cli_module
+
+    args = _base_args(tmp_path)
+    created_runtime_ids: list[int] = []
+
+    def _fake_create_runtime(_args):  # noqa: ANN001
+        runtime_id = len(created_runtime_ids) + 1
+        created_runtime_ids.append(runtime_id)
+        return SimpleNamespace(runtime_id=runtime_id)
+
+    def _fake_execute(runtime, **kwargs):  # noqa: ANN001
+        return {
+            "run_id": f"run_parallel_{kwargs['task_key']}",
+            "task_key": kwargs["task_key"],
+            "status": "SUCCEEDED",
+            "best_prompt_version": "pv_parallel",
+            "metrics": {"runtime_id": getattr(runtime, "runtime_id", None)},
+            "budget_usage": {"iterations_used": 1},
+        }
+
+    monkeypatch.setattr(cli_module, "_create_runtime", _fake_create_runtime)
+    monkeypatch.setattr(cli_module, "_execute_autoprompt_job", _fake_execute)
+
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--top-k",
+            "2",
+            "--autoprompt-run",
+            "--autoprompt-execute",
+            "--autoprompt-execute-parallel",
+            "2",
+            "--output-json",
+        ]
+    )
+    assert code == 0
+    payload = _read_json_output(capsys)
+    execution = payload["autoprompt_execution"]
+    assert execution["parallelism_requested"] == 2
+    assert execution["parallelism_used"] == 2
+    assert execution["executed_runs"] == 2
+    # Initial runtime check + one runtime per parallel task.
+    assert len(created_runtime_ids) == 3

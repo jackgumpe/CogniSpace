@@ -9,6 +9,8 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -144,7 +146,9 @@ def _dos_help_text() -> str:
         "              [--NO-RUN-TESTS] [--BASE main] [--HEAD <branch>] [--OUTPUT-JSON]",
         "  GITOPS SYNC-MAIN [--MAIN-BRANCH main] [--REMOTE origin] [--PRUNE] [--OUTPUT-JSON]",
         "  GITOPS META-ITERATE [--FEATURES-FILE path.json] [--STORE-PATH path.json] [--TOP-K N]",
-        "                      [--AUTOPROMPT-RUN] [--AUTOPROMPT-EXECUTE] [--OUTPUT-JSON]",
+        "                      [--AUTOPROMPT-RUN] [--AUTOPROMPT-EXECUTE]",
+        "                      [--AUTOPROMPT-EXECUTE-PARALLEL N] [--AUTOPROMPT-EXECUTE-RETRIES N]",
+        "                      [--AUTOPROMPT-EXECUTE-BACKOFF-MS N] [--OUTPUT-JSON]",
         "",
         "METRICS TUNING",
         "  AUTOPROMPT METRICS SHOW [--OUTPUT-JSON]",
@@ -1094,56 +1098,125 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
         command_rows = payload.get("autoprompt_run_plan", {}).get("commands", [])
         execution_rows: list[dict[str, Any]] = []
         execution_session_id = f"sess_meta_iterate_exec_{uuid4().hex[:10]}"
+        parallel_requested = max(1, int(args.autoprompt_execute_parallel))
+        parallel_used = min(parallel_requested, max(len(command_rows), 1))
+        max_retries = max(0, int(args.autoprompt_execute_retries))
+        backoff_seconds = max(0.0, float(args.autoprompt_execute_backoff_ms) / 1000.0)
 
-        for row in command_rows:
-            feature_name = str(row.get("feature", "feature"))
-            task_key = str(row.get("task_key", _meta_iterate_task_key(feature_name)))
-            prompt_text = str(row.get("prompt", ""))
-            trace_id = f"trace_meta_iterate_exec_{uuid4().hex[:10]}"
-            try:
-                run_result = _execute_autoprompt_job(
-                    execute_runtime,
-                    task_key=task_key,
-                    prompt=prompt_text,
-                    session_id=execution_session_id,
-                    trace_id=trace_id,
-                    max_iterations=args.execute_max_iterations,
-                    max_tokens=args.execute_max_tokens,
-                    max_cost_usd=args.execute_max_cost_usd,
-                    timeout_seconds=args.execute_timeout_seconds,
-                    required_keywords=["tests", "rollback", feature_name],
-                    forbidden_patterns=[],
-                    min_similarity=args.execute_min_similarity,
-                )
-                execution_rows.append(
-                    {
-                        "feature": feature_name,
-                        "task_key": task_key,
-                        "run_id": run_result.get("run_id"),
-                        "status": run_result.get("status"),
-                        "best_prompt_version": run_result.get("best_prompt_version"),
-                        "metrics": run_result.get("metrics"),
-                        "budget_usage": run_result.get("budget_usage"),
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001
-                execution_rows.append(
-                    {
-                        "feature": feature_name,
-                        "task_key": task_key,
-                        "status": "ERROR",
-                        "error": str(exc),
-                    }
-                )
+        def _run_one(
+            row_index: int,
+            row_payload: dict[str, Any],
+            *,
+            row_runtime: Runtime,
+        ) -> tuple[int, dict[str, Any]]:
+            feature_name = str(row_payload.get("feature", "feature"))
+            task_key = str(row_payload.get("task_key", _meta_iterate_task_key(feature_name)))
+            prompt_text = str(row_payload.get("prompt", ""))
+            row_session_id = f"{execution_session_id}_{row_index + 1}"
+            attempt_logs: list[dict[str, Any]] = []
+            last_error: str | None = None
+
+            for attempt in range(1, max_retries + 2):
+                trace_id = f"trace_meta_iterate_exec_{uuid4().hex[:10]}"
+                started = time.monotonic()
+                try:
+                    run_result = _execute_autoprompt_job(
+                        row_runtime,
+                        task_key=task_key,
+                        prompt=prompt_text,
+                        session_id=row_session_id,
+                        trace_id=trace_id,
+                        max_iterations=args.execute_max_iterations,
+                        max_tokens=args.execute_max_tokens,
+                        max_cost_usd=args.execute_max_cost_usd,
+                        timeout_seconds=args.execute_timeout_seconds,
+                        required_keywords=["tests", "rollback", feature_name],
+                        forbidden_patterns=[],
+                        min_similarity=args.execute_min_similarity,
+                    )
+                    duration_ms = round((time.monotonic() - started) * 1000.0, 3)
+                    attempt_logs.append(
+                        {
+                            "attempt": attempt,
+                            "status": "SUCCEEDED",
+                            "run_id": run_result.get("run_id"),
+                            "duration_ms": duration_ms,
+                        }
+                    )
+                    return (
+                        row_index,
+                        {
+                            "feature": feature_name,
+                            "task_key": task_key,
+                            "session_id": row_session_id,
+                            "run_id": run_result.get("run_id"),
+                            "status": run_result.get("status"),
+                            "best_prompt_version": run_result.get("best_prompt_version"),
+                            "metrics": run_result.get("metrics"),
+                            "budget_usage": run_result.get("budget_usage"),
+                            "attempts_used": attempt,
+                            "retry_count": attempt - 1,
+                            "attempt_logs": attempt_logs,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    duration_ms = round((time.monotonic() - started) * 1000.0, 3)
+                    last_error = str(exc)
+                    attempt_logs.append(
+                        {
+                            "attempt": attempt,
+                            "status": "ERROR",
+                            "error": last_error,
+                            "duration_ms": duration_ms,
+                        }
+                    )
+                    if attempt <= max_retries and backoff_seconds > 0:
+                        time.sleep(backoff_seconds * (2 ** (attempt - 1)))
+
+            return (
+                row_index,
+                {
+                    "feature": feature_name,
+                    "task_key": task_key,
+                    "session_id": row_session_id,
+                    "status": "ERROR",
+                    "error": last_error or "unknown execution error",
+                    "attempts_used": max_retries + 1,
+                    "retry_count": max_retries,
+                    "attempt_logs": attempt_logs,
+                },
+            )
+
+        if parallel_used == 1:
+            for idx, row in enumerate(command_rows):
+                _, result_row = _run_one(idx, row, row_runtime=execute_runtime)
+                execution_rows.append(result_row)
+        else:
+            indexed_results: list[tuple[int, dict[str, Any]]] = []
+            with ThreadPoolExecutor(max_workers=parallel_used) as pool:
+                future_map = {
+                    pool.submit(_run_one, idx, row, row_runtime=_create_runtime(args)): idx
+                    for idx, row in enumerate(command_rows)
+                }
+                for future in as_completed(future_map):
+                    indexed_results.append(future.result())
+            indexed_results.sort(key=lambda item: item[0])
+            execution_rows = [row for _, row in indexed_results]
 
         succeeded_runs = sum(1 for row in execution_rows if row.get("status") == "SUCCEEDED")
         failed_runs = len(execution_rows) - succeeded_runs
+        total_retry_count = sum(int(row.get("retry_count", 0)) for row in execution_rows)
         payload["autoprompt_execution"] = {
             "mode": "execute_runs",
             "execution_session_id": execution_session_id,
             "executed_runs": len(execution_rows),
             "succeeded_runs": succeeded_runs,
             "failed_runs": failed_runs,
+            "parallelism_requested": parallel_requested,
+            "parallelism_used": parallel_used,
+            "max_retries": max_retries,
+            "backoff_ms": int(args.autoprompt_execute_backoff_ms),
+            "total_retry_count": total_retry_count,
             "runs": execution_rows,
         }
         if failed_runs > 0:
@@ -1886,6 +1959,9 @@ def _build_parser() -> argparse.ArgumentParser:
     gitops_meta_iterate.add_argument("--reset-store", action="store_true")
     gitops_meta_iterate.add_argument("--autoprompt-run", action="store_true")
     gitops_meta_iterate.add_argument("--autoprompt-execute", action="store_true")
+    gitops_meta_iterate.add_argument("--autoprompt-execute-parallel", type=int, default=1)
+    gitops_meta_iterate.add_argument("--autoprompt-execute-retries", type=int, default=1)
+    gitops_meta_iterate.add_argument("--autoprompt-execute-backoff-ms", type=int, default=250)
     gitops_meta_iterate.add_argument("--execute-max-iterations", type=int, default=3)
     gitops_meta_iterate.add_argument("--execute-max-tokens", type=int, default=5000)
     gitops_meta_iterate.add_argument("--execute-max-cost-usd", type=float, default=1.0)
