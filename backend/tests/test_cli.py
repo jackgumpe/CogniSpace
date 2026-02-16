@@ -936,3 +936,43 @@ def test_cli_gitops_meta_iterate_autoprompt_execute_parallel_reports_parallelism
     assert execution["executed_runs"] == 2
     # Initial runtime check + one runtime per parallel task.
     assert len(created_runtime_ids) == 3
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_parallelism_guard_high(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    args = _base_args(tmp_path)
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--autoprompt-execute",
+            "--autoprompt-execute-parallel",
+            "12",
+            "--output-json",
+        ]
+    )
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "META_ITERATE_INVALID_PARALLELISM"
+    assert payload["provided"] == 12
+    assert payload["max_allowed"] == 8
+
+
+def test_cli_gitops_meta_iterate_autoprompt_execute_parallelism_guard_low(tmp_path: Path, capsys) -> None:  # noqa: ANN001
+    args = _base_args(tmp_path)
+    code = main(
+        args
+        + [
+            "gitops",
+            "meta-iterate",
+            "--autoprompt-execute",
+            "--autoprompt-execute-parallel",
+            "0",
+            "--output-json",
+        ]
+    )
+    assert code == 2
+    payload = _read_json_output(capsys)
+    assert payload["error_code"] == "META_ITERATE_INVALID_PARALLELISM"
+    assert payload["provided"] == 0
+    assert payload["min_allowed"] == 1

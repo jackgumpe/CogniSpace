@@ -51,6 +51,9 @@ _META_ITERATE_WEIGHTS_V1 = {
     "risk_inverse": 0.15,
 }
 
+_META_ITERATE_EXECUTE_PARALLEL_MIN = 1
+_META_ITERATE_EXECUTE_PARALLEL_MAX = 8
+
 _DEFAULT_META_ITERATE_FEATURES_V1 = [
     {
         "feature": "gitops_ship_profiles",
@@ -865,6 +868,31 @@ def _meta_iterate_autoprompt_command(task_key: str, prompt: str, feature_name: s
 
 def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
     exit_code = 0
+    parallel_requested = int(args.autoprompt_execute_parallel)
+    if args.autoprompt_execute and (
+        parallel_requested < _META_ITERATE_EXECUTE_PARALLEL_MIN
+        or parallel_requested > _META_ITERATE_EXECUTE_PARALLEL_MAX
+    ):
+        _emit(
+            {
+                "status": "error",
+                "error_code": "META_ITERATE_INVALID_PARALLELISM",
+                "message": (
+                    "Invalid autoprompt execution parallelism. "
+                    f"Use --autoprompt-execute-parallel {_META_ITERATE_EXECUTE_PARALLEL_MIN}-"
+                    f"{_META_ITERATE_EXECUTE_PARALLEL_MAX}."
+                ),
+                "provided": parallel_requested,
+                "min_allowed": _META_ITERATE_EXECUTE_PARALLEL_MIN,
+                "max_allowed": _META_ITERATE_EXECUTE_PARALLEL_MAX,
+                "fix": [
+                    f"Use --autoprompt-execute-parallel {_META_ITERATE_EXECUTE_PARALLEL_MIN} for serial execution.",
+                    f"Use --autoprompt-execute-parallel <= {_META_ITERATE_EXECUTE_PARALLEL_MAX} for bounded parallelism.",
+                ],
+            },
+            as_json=args.output_json,
+        )
+        return 2
 
     if args.features_file:
         try:
@@ -1098,7 +1126,6 @@ def _run_gitops_meta_iterate(args: argparse.Namespace, runtime: Runtime) -> int:
         command_rows = payload.get("autoprompt_run_plan", {}).get("commands", [])
         execution_rows: list[dict[str, Any]] = []
         execution_session_id = f"sess_meta_iterate_exec_{uuid4().hex[:10]}"
-        parallel_requested = max(1, int(args.autoprompt_execute_parallel))
         parallel_used = min(parallel_requested, max(len(command_rows), 1))
         max_retries = max(0, int(args.autoprompt_execute_retries))
         backoff_seconds = max(0.0, float(args.autoprompt_execute_backoff_ms) / 1000.0)
